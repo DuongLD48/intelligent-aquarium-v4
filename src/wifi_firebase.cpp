@@ -1,0 +1,647 @@
+// ================================================================
+// wifi_firebase.cpp — Intelligent Aquarium v4.0
+//
+// Thư viện: mobizt/FirebaseClient v2.x
+//
+// ── ĐIỂM QUAN TRỌNG TỪ SOURCE THỰC TẾ ──────────────────────────
+//
+// 1. ENABLE_DATABASE phải được define TRƯỚC khi include
+//    FirebaseClient.h (đã define trong wifi_firebase.h)
+//    → Nếu không, RealtimeDatabase.h sẽ không được include
+//
+// 2. AsyncClientClass v2.1+ là network-independent
+//    → Constructor chỉ cần WiFiClientSecure, không cần DefaultNetwork
+//    → AsyncClientClass aClient(ssl_client);
+//
+// 3. initializeApp signatures (từ source line 307, 322):
+//    - initializeApp(aClient, app, getAuth(auth), timeoutMs, cb)
+//    - initializeApp(aClient, app, getAuth(auth), cb, uid)
+//
+// 4. set<T> signatures (từ source line 439, 464):
+//    - set(aClient, path, value, aResult)
+//    - set(aClient, path, value, cb, uid, etag)
+//
+// 5. get (SSE stream) signature (từ source line 122):
+//    - get(aClient, path, cb, sse=true, uid)
+//
+// 6. Callback type: AsyncResultCallback = void(*)(AsyncResult&)
+//    → Phải là free function hoặc static, KHÔNG là lambda trong
+//      một số compiler versions của Arduino/ESP32
+//    → Dùng free function để an toàn nhất
+//
+// 7. RealtimeDatabaseResult truy cập qua:
+//    aResult.to<RealtimeDatabaseResult>()
+//    rồi RTDB.event(), RTDB.dataPath(), RTDB.to<T>()
+// ================================================================
+
+#include "wifi_firebase.h"     // Đã có #define ENABLE_DATABASE
+#include "credentials.h"
+#include "logger.h"
+#include "config_manager.h"
+#include "data_pipeline.h"
+#include "analytics.h"
+#include "safety_core.h"
+#include "water_change_manager.h"
+#include "system_constants.h"
+
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <FirebaseClient.h>    // Include SAU wifi_firebase.h để ENABLE_DATABASE có hiệu lực
+
+#include <time.h>
+#include <string.h>
+#include <stdio.h>
+
+// ----------------------------------------------------------------
+// Forward extern — các global singleton khai báo trong main.cpp
+// nhưng không có extern trong header tương ứng
+// ----------------------------------------------------------------
+extern DataPipeline dataPipeline;
+
+// ----------------------------------------------------------------
+// using alias
+// ----------------------------------------------------------------
+using AsyncClient = AsyncClientClass;
+
+// ----------------------------------------------------------------
+// Forward declarations — free function callbacks
+// ----------------------------------------------------------------
+static void onUploadResult (AsyncResult& r);
+static void onStream1Result(AsyncResult& r);
+static void onStream2Result(AsyncResult& r);
+
+// ================================================================
+// Global singletons
+// ================================================================
+WiFiManager         wifiManager;
+AquaFirebaseClient  firebaseClient;
+
+// ================================================================
+// Firebase v2 objects — file-scope
+// ================================================================
+
+// SSL clients — mỗi connection cần 1 instance riêng
+static WiFiClientSecure ssl_upload;    // cho set/patch
+static WiFiClientSecure ssl_stream1;   // cho stream /settings
+static WiFiClientSecure ssl_stream2;   // cho stream /manual_trigger
+
+// AsyncClient v2.1+: constructor chỉ cần ssl client
+// (network-independent — không cần DefaultNetwork)
+static AsyncClient aClient      (ssl_upload);
+static AsyncClient aClientStream1(ssl_stream1);
+static AsyncClient aClientStream2(ssl_stream2);
+
+// Auth: LegacyToken (Database Secret)
+// Lấy tại: Firebase Console → Project Settings → Service accounts → Database secrets
+// Điền vào credentials.h: #define FIREBASE_TOKEN "your-database-secret"
+static LegacyToken legacy_auth(FIREBASE_TOKEN);
+static FirebaseApp app;
+static RealtimeDatabase Database;
+
+// Con trỏ tới instance để callback tự do có thể gọi lại methods
+static AquaFirebaseClient* _fbClient = nullptr;
+
+// ================================================================
+// ================================================================
+// WiFiManager
+// ================================================================
+// ================================================================
+
+WiFiManager::WiFiManager()
+    : _ssid(nullptr), _password(nullptr),
+      _lastReconnectMs(0), _wasConnected(false) {}
+
+void WiFiManager::begin(const char* ssid, const char* password) {
+    _ssid = ssid;
+    _password = password;
+    WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(false);
+    _connect();
+}
+
+void WiFiManager::loop() {
+    bool c = isConnected();
+    if (_wasConnected && !c)
+        LOG_WARNING("WIFI", "Disconnected!");
+    if (!_wasConnected && c)
+        LOG_INFO("WIFI", "Connected! IP=%s RSSI=%d dBm",
+                 WiFi.localIP().toString().c_str(), rssi());
+    _wasConnected = c;
+
+    if (!c) {
+        uint32_t now = millis();
+        if (now - _lastReconnectMs >= WIFI_RECONNECT_INTERVAL_MS) {
+            _lastReconnectMs = now;
+            LOG_INFO("WIFI", "Reconnecting \"%s\"...", _ssid);
+            _connect();
+        }
+    }
+}
+
+bool WiFiManager::isConnected() const { return WiFi.status() == WL_CONNECTED; }
+int  WiFiManager::rssi()        const { return isConnected() ? (int)WiFi.RSSI() : 0; }
+void WiFiManager::_connect()          { WiFi.begin(_ssid, _password); }
+
+// ================================================================
+// ================================================================
+// AquaFirebaseClient
+// ================================================================
+// ================================================================
+
+AquaFirebaseClient::AquaFirebaseClient()
+    : _ready(false), _lastUploadMs(0),
+      _lastSettingsStreamMs(0), _lastTriggerStreamMs(0) {}
+
+// ================================================================
+// BEGIN
+// ================================================================
+void AquaFirebaseClient::begin() {
+    if (_ready) return;
+    _fbClient = this;
+
+    LOG_INFO("FB", "Initializing...");
+
+    // Bỏ verify SSL certificate
+    ssl_upload.setInsecure();
+    ssl_stream1.setInsecure();
+    ssl_stream2.setInsecure();
+
+    // initializeApp với LegacyToken + callback
+    // Signature: initializeApp(aClient, app, getAuth(auth), cb, uid)
+    initializeApp(aClient, app, getAuth(legacy_auth), onUploadResult, "authTask");
+
+    // Bind RealtimeDatabase với app, set URL
+    app.getApp<RealtimeDatabase>(Database);
+    Database.url(FIREBASE_URL);
+
+    // Bắt đầu 2 stream
+    _startSettingsStream();
+    _startTriggerStream();
+
+    _ready = true;
+    uint32_t now = millis();
+    _lastUploadMs         = 0;
+    _lastSettingsStreamMs = now;
+    _lastTriggerStreamMs  = now;
+
+    LOG_INFO("FB", "Ready. Device=%s", FIREBASE_DEVICE);
+}
+
+// ================================================================
+// LOOP
+// ================================================================
+void AquaFirebaseClient::loop(
+    const CleanReading&    clean,
+    const AnalyticsResult& analytics,
+    const RelayCommand&    relayState,
+    WaterChangeState       wcState,
+    uint32_t               wcLastRun,
+    SafetyEvent            lastSafetyEvent,
+    bool                   safeMode)
+{
+    if (!_ready || !wifiManager.isConnected()) return;
+
+    // BẮT BUỘC gọi mỗi iteration
+    app.loop();
+    Database.loop();
+
+    uint32_t now = millis();
+    if (now - _lastUploadMs >= FIREBASE_UPLOAD_INTERVAL_MS) {
+        _lastUploadMs = now;
+        _uploadAll(clean, analytics, relayState,
+                   wcState, wcLastRun, lastSafetyEvent, safeMode);
+    }
+
+    _checkStreamHealth();
+}
+
+// ================================================================
+// UPLOAD ALL
+// ================================================================
+void AquaFirebaseClient::_uploadAll(
+    const CleanReading& c, const AnalyticsResult& a,
+    const RelayCommand& r, WaterChangeState wcState,
+    uint32_t wcLastRun, SafetyEvent lastEvt, bool safeMode)
+{
+    String t  = _buildTelemetryJson(c);
+    String an = _buildAnalyticsJson(a);
+    String rl = _buildRelayJson(r);
+    String st = _buildStatusJson(lastEvt, safeMode);
+    // Signature: set(aClient, path, value, cb, uid, etag)
+    Database.set<object_t>(aClient, DB_PATH("telemetry"),
+        object_t(t.c_str()),  onUploadResult, "upTel");
+    Database.set<object_t>(aClient, DB_PATH("analytics"),
+        object_t(an.c_str()), onUploadResult, "upAna");
+    Database.set<object_t>(aClient, DB_PATH("relay_state"),
+        object_t(rl.c_str()), onUploadResult, "upRly");
+    Database.set<object_t>(aClient, DB_PATH("status"),
+        object_t(st.c_str()), onUploadResult, "upSta");
+
+    // QUAN TRỌNG: KHÔNG set() toàn node water_change vì sẽ xoá
+    // manual_trigger (field của Web). Chỉ patch riêng từng field.
+    Database.set<String>(aClient, DB_PATH("water_change/state"),
+        String(_wcStateStr(wcState)), onUploadResult, "upWC_s");
+    Database.set<number_t>(aClient, DB_PATH("water_change/last_run"),
+        number_t((double)wcLastRun, 0), onUploadResult, "upWC_r");
+    // trigger_source được ghi riêng bởi _writeTriggerSource()
+}
+
+// ================================================================
+// JSON BUILDERS
+// ================================================================
+String AquaFirebaseClient::_buildTelemetryJson(const CleanReading& c) {
+    char b[512];
+    snprintf(b, sizeof(b),
+        "{\"timestamp\":%ld"
+        ",\"temperature\":%.2f,\"ph\":%.3f,\"tds\":%.1f"
+        ",\"temp_source\":\"%s\",\"ph_source\":\"%s\",\"tds_source\":\"%s\""
+        ",\"temp_status\":\"%s\",\"ph_status\":\"%s\",\"tds_status\":\"%s\""
+        ",\"shock_temp\":%s,\"shock_ph\":%s"
+        ",\"fb_temp\":%d,\"fb_ph\":%d,\"fb_tds\":%d}",
+        (long)time(nullptr),
+        c.temperature, c.ph, c.tds,
+        _dataSourceStr(c.source_temperature),
+        _dataSourceStr(c.source_ph),
+        _dataSourceStr(c.source_tds),
+        _fieldStatusStr(c.status_temperature),
+        _fieldStatusStr(c.status_ph),
+        _fieldStatusStr(c.status_tds),
+        c.shock_temperature ? "true" : "false",
+        c.shock_ph          ? "true" : "false",
+        (int)c.fallback_count_temp,
+        (int)c.fallback_count_ph,
+        (int)c.fallback_count_tds);
+    return String(b);
+}
+
+String AquaFirebaseClient::_buildAnalyticsJson(const AnalyticsResult& a) {
+    char b[256];
+    snprintf(b, sizeof(b),
+        "{\"ema_temp\":%.2f,\"ema_ph\":%.3f,\"ema_tds\":%.1f"
+        ",\"drift_temp\":\"%s\",\"drift_ph\":\"%s\",\"drift_tds\":\"%s\""
+        ",\"wsi\":%.1f,\"fsi\":%.2f}",
+        a.ema_temp, a.ema_ph, a.ema_tds,
+        _driftDirStr(a.drift_temp),
+        _driftDirStr(a.drift_ph),
+        _driftDirStr(a.drift_tds),
+        a.wsi, a.fsi);
+    return String(b);
+}
+
+String AquaFirebaseClient::_buildRelayJson(const RelayCommand& cmd) {
+    char b[128];
+    snprintf(b, sizeof(b),
+        "{\"heater\":%s,\"cooler\":%s"
+        ",\"ph_up\":%s,\"ph_down\":%s"
+        ",\"pump_in\":%s,\"pump_out\":%s}",
+        cmd.heater    ? "true" : "false",
+        cmd.cooler    ? "true" : "false",
+        cmd.ph_up     ? "true" : "false",
+        cmd.ph_down   ? "true" : "false",
+        cmd.pump_in   ? "true" : "false",
+        cmd.pump_out  ? "true" : "false");
+    return String(b);
+}
+
+String AquaFirebaseClient::_buildStatusJson(SafetyEvent e, bool safeMode) {
+    char b[192];
+    snprintf(b, sizeof(b),
+        "{\"uptime_s\":%lu,\"wifi_rssi\":%d,\"free_heap\":%lu"
+        ",\"safe_mode\":%s,\"last_safety_event\":\"%s\"}",
+        (unsigned long)(millis() / 1000UL),
+        wifiManager.rssi(),
+        (unsigned long)ESP.getFreeHeap(),
+        safeMode ? "true" : "false",
+        _safetyEventStr(e));
+    return String(b);
+}
+
+// ================================================================
+// PUSH SAFETY EVENT
+// ================================================================
+void AquaFirebaseClient::pushSafetyEvent(SafetyEvent evt) {
+    if (!_ready || !wifiManager.isConnected()) return;
+    Database.set<String>(aClient,
+        DB_PATH("status/last_safety_event"),
+        String(_safetyEventStr(evt)),
+        onUploadResult, "pushEvt");
+    LOG_INFO("FB", "SafetyEvent: %s", _safetyEventStr(evt));
+}
+
+// ================================================================
+// TRIGGER SOURCE
+// ================================================================
+void AquaFirebaseClient::notifyButtonTrigger()   { _writeTriggerSource("BUTTON");   }
+void AquaFirebaseClient::notifyScheduleTrigger() { _writeTriggerSource("SCHEDULE"); }
+void AquaFirebaseClient::notifyTriggerDone()     { _writeTriggerSource("NONE");     }
+void AquaFirebaseClient::_notifyWebTrigger()     { _writeTriggerSource("WEB");      }
+
+void AquaFirebaseClient::_writeTriggerSource(const char* src) {
+    if (!_ready || !wifiManager.isConnected()) return;
+    Database.set<String>(aClient,
+        DB_PATH("water_change/trigger_source"),
+        String(src), onUploadResult, "trigSrc");
+    LOG_DEBUG("FB", "trigger_source=\"%s\"", src);
+}
+
+// ================================================================
+// STREAM 1 — /settings (SSE)
+// ================================================================
+void AquaFirebaseClient::_startSettingsStream() {
+    // Signature: get(aClient, path, cb, sse, uid)
+    Database.get(aClientStream1,
+        DB_PATH("settings"),
+        onStream1Result,
+        true,        // SSE mode
+        "stream1");
+    LOG_INFO("FB", "Stream1: %s", DB_PATH("settings"));
+}
+
+// ================================================================
+// STREAM 2 — /water_change/manual_trigger (SSE)
+// ================================================================
+void AquaFirebaseClient::_startTriggerStream() {
+    Database.get(aClientStream2,
+        DB_PATH("water_change/manual_trigger"),
+        onStream2Result,
+        true,        // SSE mode
+        "stream2");
+    LOG_INFO("FB", "Stream2: %s",
+             DB_PATH("water_change/manual_trigger"));
+}
+
+// ================================================================
+// STREAM HEALTH CHECK
+// ================================================================
+void AquaFirebaseClient::_checkStreamHealth() {
+    uint32_t now = millis();
+    if (now - _lastSettingsStreamMs > FIREBASE_STREAM_RETRY_MS) {
+        LOG_WARNING("FB", "Stream1 stale → restart");
+        _startSettingsStream();
+        _lastSettingsStreamMs = now;
+    }
+    if (now - _lastTriggerStreamMs > FIREBASE_STREAM_RETRY_MS) {
+        LOG_WARNING("FB", "Stream2 stale → restart");
+        _startTriggerStream();
+        _lastTriggerStreamMs = now;
+    }
+}
+
+// ================================================================
+// PARSE /settings PAYLOAD
+// ================================================================
+void AquaFirebaseClient::_onSettingsPayload(const char* json) {
+    if (!json || !*json) return;
+
+    // Helper: tìm '{' của sub-object theo key
+    auto findSub = [](const char* s, const char* key) -> const char* {
+        const char* p = strstr(s, key);
+        if (!p) return nullptr;
+        return strchr(p + strlen(key), '{');
+    };
+
+    // ---- 1. config ----
+    {
+        const char* sub = findSub(json, "\"config\"");
+        if (sub) {
+            ControlConfig cc = configManager.getControlConfig();
+            if (configManager.parseControlConfigJson(sub, cc)) {
+                configManager.applyControlConfig(cc);
+                LOG_INFO("FB", "Settings: config OK");
+            }
+        }
+    }
+
+    // ---- 2. pipeline_config ----
+    {
+        const char* sub = findSub(json, "\"pipeline_config\"");
+        if (sub) {
+            PipelineConfig pc = dataPipeline.getConfig();
+            if (configManager.parsePipelineConfigJson(sub, pc)) {
+                configManager.applyPipelineConfig(pc);
+                dataPipeline.setConfig(pc);
+                LOG_INFO("FB", "Settings: pipeline_config OK");
+            }
+        }
+    }
+
+    // ---- 3. analytics_config ----
+    {
+        const char* sub = findSub(json, "\"analytics_config\"");
+        if (sub) {
+            AnalyticsConfig ac = analytics.getConfig();
+            float v;
+            auto pF = [&](const char* k, float& out, float lo, float hi) {
+                const char* p = strstr(sub, k);
+                if (!p) return;
+                p += strlen(k);
+                while (*p=='"'||*p==':'||*p==' ') p++;
+                if (sscanf(p, "%f", &v)==1 && v>=lo && v<=hi) out = v;
+            };
+            pF("\"ema_alpha\"",       ac.ema_alpha,       0.001f,  0.5f);
+            pF("\"cusum_k\"",         ac.cusum_k,         0.001f, 10.0f);
+            pF("\"cusum_threshold\"", ac.cusum_threshold, 0.001f,100.0f);
+            analytics.setConfig(ac);
+            LOG_INFO("FB", "Settings: analytics_config OK");
+        }
+    }
+
+    // ---- 4. safety_limits ----
+    {
+        const char* sub = findSub(json, "\"safety_limits\"");
+        if (sub) {
+            SafetyLimits sl = safetyCore.getLimits();
+            float fv; int iv;
+            auto pF = [&](const char* k, float& out) {
+                const char* p = strstr(sub, k);
+                if (!p) return;
+                p += strlen(k);
+                while (*p=='"'||*p==':'||*p==' ') p++;
+                if (sscanf(p, "%f", &fv)==1) out = fv;
+            };
+            auto pU = [&](const char* k, uint32_t& out) {
+                const char* p = strstr(sub, k);
+                if (!p) return;
+                p += strlen(k);
+                while (*p=='"'||*p==':'||*p==' ') p++;
+                if (sscanf(p, "%d", &iv)==1 && iv>0) out = (uint32_t)iv;
+            };
+            pF("\"thermal_cutoff_c\"",        sl.thermal_cutoff_c);
+            pF("\"temp_emergency_cool_c\"",   sl.temp_emergency_cool_c);
+            pU("\"heater_max_runtime_ms\"",   sl.heater_max_runtime_ms);
+            pU("\"heater_cooldown_ms\"",      sl.heater_cooldown_ms);
+            pU("\"ph_pump_max_pulse_ms\"",    sl.ph_pump_max_pulse_ms);
+            pU("\"ph_pump_min_interval_ms\"", sl.ph_pump_min_interval_ms);
+            {
+                const char* p = strstr(sub, "\"stale_sensor_threshold\"");
+                if (p) {
+                    p += strlen("\"stale_sensor_threshold\"");
+                    while (*p=='"'||*p==':'||*p==' ') p++;
+                    if (sscanf(p, "%d", &iv)==1 && iv>0)
+                        sl.stale_sensor_threshold = (uint8_t)iv;
+                }
+            }
+            if (safetyCore.setLimits(sl))
+                LOG_INFO("FB", "Settings: safety_limits OK");
+        }
+    }
+
+    // ---- 5. water_schedule ----
+    {
+        const char* sub = findSub(json, "\"water_schedule\"");
+        if (sub) {
+            WaterChangeSchedule ws = configManager.getWaterSchedule();
+            if (configManager.parseWaterScheduleJson(sub, ws)) {
+                configManager.applyWaterSchedule(ws);
+                WaterChangeConfig wc = waterChangeManager.getConfig();
+                wc.schedule_enabled = ws.enabled;
+                wc.schedule_hour    = ws.hour;
+                wc.schedule_minute  = ws.minute;
+                wc.pump_out_sec     = ws.pump_out_sec;
+                wc.pump_in_sec      = ws.pump_in_sec;
+                waterChangeManager.setConfig(wc);
+                LOG_INFO("FB", "Settings: water_schedule OK");
+            }
+        }
+    }
+}
+
+// ================================================================
+// PROCESS MANUAL TRIGGER
+// ================================================================
+void AquaFirebaseClient::_onTriggerPayload(bool triggered) {
+    if (!triggered) return;
+
+    LOG_INFO("FB", "manual_trigger=true (Web)");
+    _notifyWebTrigger();
+
+    if (!waterChangeManager.isBusy()) {
+        waterChangeManager.triggerManual();
+        LOG_INFO("FB", "Water change triggered via Web");
+    } else {
+        LOG_WARNING("FB", "manual_trigger ignored: busy (%s)",
+                    _wcStateStr(waterChangeManager.getState()));
+    }
+
+    // Reset manual_trigger → false
+    Database.set<bool>(aClient,
+        DB_PATH("water_change/manual_trigger"),
+        false, onUploadResult, "resetTrig");
+}
+
+// ================================================================
+// ================================================================
+// FREE FUNCTION CALLBACKS
+// Bắt buộc là free function — không phải lambda hay static method
+// để đảm bảo tương thích với AsyncResultCallback type
+// ================================================================
+// ================================================================
+
+static void onUploadResult(AsyncResult& r) {
+    if (r.isError())
+        LOG_WARNING("FB", "[%s] %s (code=%d)",
+                    r.uid().c_str(),
+                    r.error().message().c_str(),
+                    r.error().code());
+}
+
+static void onStream1Result(AsyncResult& r) {
+    if (!_fbClient) return;
+
+    if (r.isError()) {
+        LOG_WARNING("FB", "Stream1 err: %s (code=%d)",
+                    r.error().message().c_str(), r.error().code());
+        return;
+    }
+    if (!r.available()) return;
+
+    // Cập nhật health timer
+    _fbClient->_lastSettingsStreamMs = millis();
+
+    // Đọc RTDB result
+    RealtimeDatabaseResult& RTDB = r.to<RealtimeDatabaseResult>();
+
+    // Chỉ xử lý khi có data thay đổi
+    if (RTDB.event() == "put" || RTDB.event() == "patch") {
+        // r.c_str() trả về raw payload JSON
+        _fbClient->_onSettingsPayload(r.c_str());
+    }
+}
+
+static void onStream2Result(AsyncResult& r) {
+    if (!_fbClient) return;
+
+    if (r.isError()) {
+        LOG_WARNING("FB", "Stream2 err: %s (code=%d)",
+                    r.error().message().c_str(), r.error().code());
+        return;
+    }
+    if (!r.available()) return;
+
+    // Cập nhật health timer
+    _fbClient->_lastTriggerStreamMs = millis();
+
+    RealtimeDatabaseResult& RTDB = r.to<RealtimeDatabaseResult>();
+
+    if (RTDB.event() == "put" || RTDB.event() == "patch") {
+        _fbClient->_onTriggerPayload(RTDB.to<bool>());
+    }
+}
+
+// ================================================================
+// ENUM → STRING
+// ================================================================
+const char* AquaFirebaseClient::_wcStateStr(WaterChangeState s) {
+    switch (s) {
+        case WaterChangeState::IDLE:        return "IDLE";
+        case WaterChangeState::PUMPING_OUT: return "PUMPING_OUT";
+        case WaterChangeState::PUMPING_IN:  return "PUMPING_IN";
+        case WaterChangeState::DONE:        return "DONE";
+        default:                            return "IDLE";
+    }
+}
+
+const char* AquaFirebaseClient::_safetyEventStr(SafetyEvent e) {
+    switch (e) {
+        case SafetyEvent::NONE:                 return "NONE";
+        case SafetyEvent::THERMAL_CUTOFF:       return "THERMAL_CUTOFF";
+        case SafetyEvent::EMERGENCY_COOL:       return "EMERGENCY_COOL";
+        case SafetyEvent::HEATER_RUNTIME_LIMIT: return "HEATER_RUNTIME_LIMIT";
+        case SafetyEvent::HEATER_COOLDOWN:      return "HEATER_COOLDOWN";
+        case SafetyEvent::SENSOR_UNRELIABLE:    return "SENSOR_UNRELIABLE";
+        case SafetyEvent::SENSOR_STALE:         return "SENSOR_STALE";
+        case SafetyEvent::MUTUAL_EXCLUSION:     return "MUTUAL_EXCLUSION";
+        case SafetyEvent::PH_PUMP_INTERVAL:     return "PH_PUMP_INTERVAL";
+        case SafetyEvent::SHOCK_GUARD:          return "SHOCK_GUARD";
+        default:                                return "NONE";
+    }
+}
+
+const char* AquaFirebaseClient::_dataSourceStr(DataSource s) {
+    switch (s) {
+        case DataSource::MEASURED:         return "MEASURED";
+        case DataSource::FALLBACK_LAST:    return "FALLBACK_LAST";
+        case DataSource::FALLBACK_MEDIAN:  return "FALLBACK_MEDIAN";
+        case DataSource::FALLBACK_DEFAULT: return "FALLBACK_DEFAULT";
+        default:                           return "MEASURED";
+    }
+}
+
+const char* AquaFirebaseClient::_fieldStatusStr(FieldStatus s) {
+    switch (s) {
+        case FieldStatus::OK:           return "OK";
+        case FieldStatus::OUT_OF_RANGE: return "OUT_OF_RANGE";
+        case FieldStatus::MAD_OUTLIER:  return "MAD_OUTLIER";
+        case FieldStatus::SENSOR_ERROR: return "SENSOR_ERROR";
+        default:                        return "OK";
+    }
+}
+
+const char* AquaFirebaseClient::_driftDirStr(DriftDir d) {
+    switch (d) {
+        case DriftDir::NONE: return "NONE";
+        case DriftDir::UP:   return "UP";
+        case DriftDir::DOWN: return "DOWN";
+        default:             return "NONE";
+    }
+}
