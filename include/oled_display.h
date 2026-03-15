@@ -12,24 +12,42 @@
 // Intelligent Aquarium v4.0
 //
 // SSD1306 128×64, giao tiếp SPI phần cứng (Adafruit library)
-// 4 trang hiển thị, render throttle 500ms.
+// Điều hướng 4 nút kiểu menu điện thoại đời cũ:
+//   UP / DOWN  → di chuyển con trỏ
+//   SELECT     → vào / xác nhận
+//   BACK       → quay lại màn trước
 //
-// Trang:
-//   PAGE_SENSORS   — T, pH, TDS + source/status indicators
-//   PAGE_ANALYTICS — EMA values, WSI bar, FSI bar, Drift
-//   PAGE_RELAY     — 6 relay trạng thái ON/OFF
-//   PAGE_SYSTEM    — Uptime, heap, WiFi RSSI, safe mode
+// ── Cấu trúc màn hình ──────────────────────────────────────────
+//
+//  [HOME] — màn hình chính, hiển thị tóm tắt nhanh
+//     │
+//     ├─ [INFO MENU] — chọn 1 trong 4 trang xem
+//     │     ├─ 1. Sensors   (T, pH, TDS)
+//     │     ├─ 2. Analytics (EMA, WSI, FSI, Drift)
+//     │     ├─ 3. Relays    (6 relay ON/OFF)
+//     │     └─ 4. System    (Uptime, Heap, WiFi)
+//     │
+//     └─ [ACTIONS MENU] — thao tác
+//           └─ 1. Water Change  (xác nhận → kích hoạt thay nước)
+//
+// Điều hướng:
+//   HOME     → UP/DOWN chọn mục → SELECT vào
+//   INFO/xxx → UP/DOWN cuộn trang → BACK về HOME
+//   ACTIONS  → UP/DOWN chọn action → SELECT xác nhận → BACK
 // ================================================================
 
 // ----------------------------------------------------------------
-// PAGE ENUM
+// UI STATE ENUM
 // ----------------------------------------------------------------
-enum class OledPage : uint8_t {
-    PAGE_SENSORS   = 0,
-    PAGE_ANALYTICS = 1,
-    PAGE_RELAY     = 2,
-    PAGE_SYSTEM    = 3,
-    PAGE_COUNT     = 4
+enum class UiScreen : uint8_t {
+    HOME            = 0,   // Màn hình chính (tóm tắt)
+    INFO_MENU       = 1,   // Menu chọn trang xem
+    VIEW_SENSORS    = 2,   // Xem T, pH, TDS
+    VIEW_ANALYTICS  = 3,   // Xem EMA, WSI, FSI
+    VIEW_RELAYS     = 4,   // Xem 6 relay
+    VIEW_SYSTEM     = 5,   // Xem uptime, heap, wifi
+    ACTIONS_MENU    = 6,   // Menu thao tác
+    ACT_WATER_CHANGE = 7,  // Xác nhận thay nước thủ công
 };
 
 // ----------------------------------------------------------------
@@ -39,10 +57,9 @@ class OledDisplay {
 public:
     OledDisplay();
 
-    // Gọi trong setup(): khởi tạo SSD1306, vẽ splash screen
     bool begin();
 
-    // Gọi trong loop() — render throttle 500ms
+    // Gọi trong loop() — render throttle 200ms
     void update(
         const CleanReading&    clean,
         const AnalyticsResult& aResult,
@@ -52,36 +69,50 @@ public:
         bool                   safeMode
     );
 
-    // Chuyển trang (từ button PAGE)
-    void nextPage();
-    void setPage(OledPage p);
-    OledPage currentPage() const { return _page; }
+    // Xử lý nút bấm — gọi sau buttonManager.update()
+    // Trả true nếu action "kích hoạt thay nước" được xác nhận
+    bool handleButtons();
+
+    UiScreen currentScreen() const { return _screen; }
 
 private:
     Adafruit_SSD1306 _display;
-    OledPage         _page;
+    UiScreen         _screen;
+    uint8_t          _cursor;       // Con trỏ menu hiện tại
     uint32_t         _lastRenderMs;
+    bool             _wcConfirmPending; // Đang chờ xác nhận thay nước?
 
-    static constexpr uint32_t RENDER_INTERVAL_MS = 500;
+    // Dữ liệu cached để render
+    const CleanReading*    _pClean    = nullptr;
+    const AnalyticsResult* _pAnalytics = nullptr;
+    const RelayCommand*    _pRelay    = nullptr;
+    WaterChangeState       _wcState   = WaterChangeState::IDLE;
+    bool                   _wifi      = false;
+    bool                   _safeMode  = false;
 
-    // Render từng trang
-    void _renderSensors  (const CleanReading& clean, WaterChangeState wcState);
-    void _renderAnalytics(const AnalyticsResult& r);
-    void _renderRelay    (const RelayCommand& cmd, WaterChangeState wcState);
-    void _renderSystem   (bool wifiConnected, bool safeMode);
+    static constexpr uint32_t RENDER_INTERVAL_MS = 200;
 
-    // Helpers
-    // Vẽ thanh progress ngang: x,y = góc trên trái, w=width, h=height, pct=0..100
+    // ── Render functions ─────────────────────────────────────────
+    void _renderHome();
+    void _renderInfoMenu();
+    void _renderViewSensors();
+    void _renderViewAnalytics();
+    void _renderViewRelays();
+    void _renderViewSystem();
+    void _renderActionsMenu();
+    void _renderActWaterChange();
+
+    // ── Helpers ──────────────────────────────────────────────────
+    void _drawHeader(const char* title, const char* hint = nullptr);
     void _drawBar(int16_t x, int16_t y, int16_t w, int16_t h, float pct);
-
-    // Indicator nguồn data: 'M'=MEASURED, 'L'=LAST, 'm'=MEDIAN, '!'=DEFAULT
+    void _drawMenuItem(int16_t y, bool selected, const char* label);
     char _sourceChar(DataSource src) const;
-
-    // Indicator status: ' '=OK, '?'=outlier, 'X'=error, 'R'=range
     char _statusChar(FieldStatus st) const;
-
-    // Tên DriftDir ngắn gọn
     const char* _driftStr(DriftDir d) const;
+
+    // ── Navigation ───────────────────────────────────────────────
+    void _goTo(UiScreen s, uint8_t cursor = 0);
+    void _clampCursor(uint8_t maxItems);
 };
 
 // Global singleton

@@ -6,23 +6,20 @@
 // Intelligent Aquarium v4.0
 // ================================================================
 
-// Global singleton
 ButtonManager buttonManager;
 
 // Pin mapping theo thứ tự BtnId
 const uint8_t ButtonManager::_pins[BTN_COUNT] = {
-    PIN_BTN_PAGE,          // BtnId::PAGE
-    PIN_BTN_UP,            // BtnId::UP
-    PIN_BTN_DOWN,          // BtnId::DOWN
-    PIN_BTN_SELECT,        // BtnId::SELECT  (GPIO 22)
-    PIN_BTN_BACK,          // BtnId::BACK    (GPIO 0)
-    PIN_BTN_WATER_CHANGE,  // BtnId::WATER_CHANGE (GPIO 2)
+    PIN_BTN_UP,      // BtnId::UP     (GPIO 33)
+    PIN_BTN_DOWN,    // BtnId::DOWN   (GPIO 32)
+    PIN_BTN_SELECT,  // BtnId::SELECT (GPIO 22)
+    PIN_BTN_BACK,    // BtnId::BACK   (GPIO 25)
 };
 
 // ----------------------------------------------------------------
 ButtonManager::ButtonManager() {
     for (uint8_t i = 0; i < BTN_COUNT; i++) {
-        _states[i] = { true, true, true, false, 0 };
+        _states[i] = { true, true, false, 0 };
         // INPUT_PULLUP: không nhấn = HIGH = true
     }
 }
@@ -31,15 +28,14 @@ ButtonManager::ButtonManager() {
 void ButtonManager::begin() {
     for (uint8_t i = 0; i < BTN_COUNT; i++) {
         pinMode(_pins[i], INPUT_PULLUP);
-        // Đọc trạng thái ban đầu
         bool raw = (digitalRead(_pins[i]) == HIGH);
         _states[i].raw          = raw;
         _states[i].debounced    = raw;
-        _states[i].lastDebounced = raw;
         _states[i].pressedFlag  = false;
         _states[i].lastChangeMs = 0;
     }
-    LOG_INFO("BTN", "ButtonManager init: 6 buttons (debounce %dms)", (int)DEBOUNCE_MS);
+    LOG_INFO("BTN", "ButtonManager init: UP=%d DOWN=%d SELECT=%d BACK=%d (debounce %dms)",
+             PIN_BTN_UP, PIN_BTN_DOWN, PIN_BTN_SELECT, PIN_BTN_BACK, (int)DEBOUNCE_MS);
 }
 
 // ================================================================
@@ -52,24 +48,22 @@ void ButtonManager::update() {
     for (uint8_t i = 0; i < BTN_COUNT; i++) {
         BtnState& s = _states[i];
 
-        // Đọc raw: INPUT_PULLUP → nhấn = LOW → raw = false
         bool rawNow = (digitalRead(_pins[i]) == HIGH);
 
-        // Nếu raw thay đổi → reset debounce timer
         if (rawNow != s.raw) {
             s.raw          = rawNow;
             s.lastChangeMs = now;
         }
 
-        // Chỉ cập nhật debounced sau khi raw ổn định >= DEBOUNCE_MS
         if ((now - s.lastChangeMs) >= DEBOUNCE_MS) {
-            bool prevDebounced = s.debounced;
+            bool prev   = s.debounced;
             s.debounced = s.raw;
 
-            // Falling edge (true → false) = nút vừa được nhấn
-            if (prevDebounced && !s.debounced) {
+            // Falling edge (true → false) = nút vừa nhấn
+            if (prev && !s.debounced) {
                 s.pressedFlag = true;
-                LOG_DEBUG("BTN", "Button %d pressed (GPIO %d)", i, _pins[i]);
+                static const char* names[] = { "UP", "DOWN", "SELECT", "BACK" };
+                LOG_DEBUG("BTN", "Button %s pressed (GPIO %d)", names[i], _pins[i]);
             }
         }
     }
@@ -79,9 +73,8 @@ void ButtonManager::update() {
 bool ButtonManager::wasPressed(BtnId id) {
     uint8_t i = (uint8_t)id;
     if (i >= BTN_COUNT) return false;
-
     if (_states[i].pressedFlag) {
-        _states[i].pressedFlag = false;  // Reset sau khi đọc
+        _states[i].pressedFlag = false;
         return true;
     }
     return false;

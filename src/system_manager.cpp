@@ -58,7 +58,7 @@ void SystemManager::begin() {
     // thông qua configManager (sẽ apply khi stream đến hoặc manual)
     LOG_INFO("SYS", "Pipeline config ready");
 
-    // 7. WaterChangeManager — apply water schedule
+    // 7. WaterChangeManager — apply water schedule + khôi phục last_run từ NVS
     {
         const WaterChangeSchedule& sched = configManager.getWaterSchedule();
         WaterChangeConfig wcfg;
@@ -68,6 +68,9 @@ void SystemManager::begin() {
         wcfg.pump_out_sec     = sched.pump_out_sec;
         wcfg.pump_in_sec      = sched.pump_in_sec;
         waterChangeManager.begin();
+        // FIX: Khôi phục last_run từ NVS trước setConfig()
+        // Tránh trigger lại trong ngày đã chạy sau khi reboot
+        waterChangeManager.restoreLastRun(sched.last_run_day, sched.last_run_ts);
         waterChangeManager.setConfig(wcfg);
     }
     LOG_INFO("SYS", "WaterChangeManager OK");

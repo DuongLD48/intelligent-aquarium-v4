@@ -58,18 +58,24 @@ public:
     void getRelayCmd(bool& pump_out, bool& pump_in) const;
 
     // JSON status để upload Firebase
-    // {"state":"IDLE","last_run_day":20250311,"busy":false}
+    // {"state":"IDLE","last_run_day":20526,"last_run_ts":1741824000,"busy":false}
     String getStatusJson() const;
 
     // Getters
     const WaterChangeConfig& getConfig()    const { return _cfg; }
     uint32_t                 lastRunDay()   const { return _lastRunDay; }
+    uint32_t                 lastRunTs()    const { return _lastRunTs; }
+
+    // Khôi phục trạng thái sau reboot — gọi từ system_manager::begin()
+    // trước khi setConfig(). Tránh trigger lại trong ngày đã chạy.
+    void restoreLastRun(uint32_t savedDay, uint32_t savedTs);
 
 private:
     WaterChangeConfig _cfg;
     WaterChangeState  _state;
     unsigned long     _stateStartMs;  // millis() khi bước vào state hiện tại
     uint32_t          _lastRunDay;    // epoch/86400 — tránh chạy 2 lần/ngày
+    uint32_t          _lastRunTs;     // Unix timestamp (UTC) khi hoàn thành — cho Firebase/web
     bool              _manualTrigger; // Cờ kích hoạt thủ công
 
     // Chạy state machine 1 tick

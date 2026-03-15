@@ -122,4 +122,5 @@ struct WaterChangeSchedule {
     uint16_t pump_out_sec  = 30;     // Thời gian bơm ra (giây)
     uint16_t pump_in_sec   = 60;     // Thời gian bơm vào (giây)
     uint32_t last_run_day  = 0;      // epoch/86400 — tránh chạy 2 lần/ngày
+    uint32_t last_run_ts   = 0;      // Unix timestamp (UTC) lúc hoàn thành — web dùng để hiển thị ngày giờ phút
 };

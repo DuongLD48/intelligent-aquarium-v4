@@ -389,50 +389,44 @@ void AquaFirebaseClient::_checkStreamHealth() {
 
 // ================================================================
 // PARSE /settings PAYLOAD
+//
+// FirebaseClient v2 SSE stream:
+//   RTDB.dataPath() = path tương đối so với node /settings
+//   r.c_str()       = raw JSON value tại path đó (trên AsyncResult)
+//
+// 3 cases:
+//   path == "/"              → full dump: {"config":{...},"pipeline_config":{...},...}
+//   path == "/config"        → group object: {"temp_min":25,...}
+//   path == "/config/temp_min" → single field: 25
 // ================================================================
-void AquaFirebaseClient::_onSettingsPayload(const char* json) {
-    if (!json || !*json) return;
+void AquaFirebaseClient::_onSettingsPayload(const char* path, const char* data) {
+    if (!path || !data || !*data) return;
 
-    // Helper: tìm '{' của sub-object theo key
-    auto findSub = [](const char* s, const char* key) -> const char* {
-        const char* p = strstr(s, key);
-        if (!p) return nullptr;
-        return strchr(p + strlen(key), '{');
-    };
-
-    // ---- 1. config ----
-    {
-        const char* sub = findSub(json, "\"config\"");
-        if (sub) {
+    // ----------------------------------------------------------------
+    // applyGroup: apply đúng group theo tên
+    // ----------------------------------------------------------------
+    auto applyGroup = [](const char* groupName, const char* groupJson) {
+        if (strcmp(groupName, "config") == 0) {
             ControlConfig cc = configManager.getControlConfig();
-            if (configManager.parseControlConfigJson(sub, cc)) {
+            if (configManager.parseControlConfigJson(groupJson, cc)) {
                 configManager.applyControlConfig(cc);
-                LOG_INFO("FB", "Settings: config OK");
+                LOG_INFO("FB", "Stream: config applied");
+            } else {
+                LOG_WARNING("FB", "Stream: config parse failed json=%s", groupJson);
             }
-        }
-    }
-
-    // ---- 2. pipeline_config ----
-    {
-        const char* sub = findSub(json, "\"pipeline_config\"");
-        if (sub) {
-            PipelineConfig pc = dataPipeline.getConfig();
-            if (configManager.parsePipelineConfigJson(sub, pc)) {
+        } else if (strcmp(groupName, "pipeline_config") == 0) {
+            PipelineConfig pc = configManager.getPipelineConfig();
+            if (configManager.parsePipelineConfigJson(groupJson, pc)) {
                 configManager.applyPipelineConfig(pc);
-                dataPipeline.setConfig(pc);
-                LOG_INFO("FB", "Settings: pipeline_config OK");
+                LOG_INFO("FB", "Stream: pipeline_config applied");
+            } else {
+                LOG_WARNING("FB", "Stream: pipeline_config parse failed");
             }
-        }
-    }
-
-    // ---- 3. analytics_config ----
-    {
-        const char* sub = findSub(json, "\"analytics_config\"");
-        if (sub) {
+        } else if (strcmp(groupName, "analytics_config") == 0) {
             AnalyticsConfig ac = analytics.getConfig();
             float v;
             auto pF = [&](const char* k, float& out, float lo, float hi) {
-                const char* p = strstr(sub, k);
+                const char* p = strstr(groupJson, k);
                 if (!p) return;
                 p += strlen(k);
                 while (*p=='"'||*p==':'||*p==' ') p++;
@@ -442,25 +436,19 @@ void AquaFirebaseClient::_onSettingsPayload(const char* json) {
             pF("\"cusum_k\"",         ac.cusum_k,         0.001f, 10.0f);
             pF("\"cusum_threshold\"", ac.cusum_threshold, 0.001f,100.0f);
             analytics.setConfig(ac);
-            LOG_INFO("FB", "Settings: analytics_config OK");
-        }
-    }
-
-    // ---- 4. safety_limits ----
-    {
-        const char* sub = findSub(json, "\"safety_limits\"");
-        if (sub) {
+            LOG_INFO("FB", "Stream: analytics_config applied");
+        } else if (strcmp(groupName, "safety_limits") == 0) {
             SafetyLimits sl = safetyCore.getLimits();
             float fv; int iv;
             auto pF = [&](const char* k, float& out) {
-                const char* p = strstr(sub, k);
+                const char* p = strstr(groupJson, k);
                 if (!p) return;
                 p += strlen(k);
                 while (*p=='"'||*p==':'||*p==' ') p++;
                 if (sscanf(p, "%f", &fv)==1) out = fv;
             };
             auto pU = [&](const char* k, uint32_t& out) {
-                const char* p = strstr(sub, k);
+                const char* p = strstr(groupJson, k);
                 if (!p) return;
                 p += strlen(k);
                 while (*p=='"'||*p==':'||*p==' ') p++;
@@ -472,38 +460,75 @@ void AquaFirebaseClient::_onSettingsPayload(const char* json) {
             pU("\"heater_cooldown_ms\"",      sl.heater_cooldown_ms);
             pU("\"ph_pump_max_pulse_ms\"",    sl.ph_pump_max_pulse_ms);
             pU("\"ph_pump_min_interval_ms\"", sl.ph_pump_min_interval_ms);
-            {
-                const char* p = strstr(sub, "\"stale_sensor_threshold\"");
-                if (p) {
-                    p += strlen("\"stale_sensor_threshold\"");
-                    while (*p=='"'||*p==':'||*p==' ') p++;
-                    if (sscanf(p, "%d", &iv)==1 && iv>0)
-                        sl.stale_sensor_threshold = (uint8_t)iv;
-                }
+            const char* p2 = strstr(groupJson, "\"stale_sensor_threshold\"");
+            if (p2) {
+                p2 += strlen("\"stale_sensor_threshold\"");
+                while (*p2=='"'||*p2==':'||*p2==' ') p2++;
+                if (sscanf(p2, "%d", &iv)==1 && iv>0)
+                    sl.stale_sensor_threshold = (uint8_t)iv;
             }
             if (safetyCore.setLimits(sl))
-                LOG_INFO("FB", "Settings: safety_limits OK");
-        }
-    }
-
-    // ---- 5. water_schedule ----
-    {
-        const char* sub = findSub(json, "\"water_schedule\"");
-        if (sub) {
+                LOG_INFO("FB", "Stream: safety_limits applied");
+        } else if (strcmp(groupName, "water_schedule") == 0) {
             WaterChangeSchedule ws = configManager.getWaterSchedule();
-            if (configManager.parseWaterScheduleJson(sub, ws)) {
+            if (configManager.parseWaterScheduleJson(groupJson, ws)) {
                 configManager.applyWaterSchedule(ws);
-                WaterChangeConfig wc = waterChangeManager.getConfig();
-                wc.schedule_enabled = ws.enabled;
-                wc.schedule_hour    = ws.hour;
-                wc.schedule_minute  = ws.minute;
-                wc.pump_out_sec     = ws.pump_out_sec;
-                wc.pump_in_sec      = ws.pump_in_sec;
-                waterChangeManager.setConfig(wc);
-                LOG_INFO("FB", "Settings: water_schedule OK");
+                LOG_INFO("FB", "Stream: water_schedule applied");
+            } else {
+                LOG_WARNING("FB", "Stream: water_schedule parse failed");
             }
         }
+    };
+
+    // ----------------------------------------------------------------
+    // Case 1: path == "/" → full /settings dump, xử lý tất cả groups
+    // ----------------------------------------------------------------
+    if (strcmp(path, "/") == 0 || strcmp(path, "") == 0) {
+        LOG_INFO("FB", "Stream1: full settings dump");
+        auto findSub = [](const char* s, const char* key) -> const char* {
+            const char* p = strstr(s, key);
+            if (!p) return nullptr;
+            return strchr(p + strlen(key), '{');
+        };
+        const char* groups[] = {
+            "config", "pipeline_config", "analytics_config",
+            "safety_limits", "water_schedule"
+        };
+        for (const char* g : groups) {
+            char sk[32];
+            snprintf(sk, sizeof(sk), "\"%s\"", g);
+            const char* sub = findSub(data, sk);
+            if (sub) applyGroup(g, sub);
+        }
+        return;
     }
+
+    // Bỏ '/' đầu
+    const char* groupName = (path[0] == '/') ? path + 1 : path;
+
+    // ----------------------------------------------------------------
+    // Case 2: path == "/config" → group-level, data là object đầy đủ
+    // ----------------------------------------------------------------
+    const char* slash = strchr(groupName, '/');
+    if (!slash) {
+        applyGroup(groupName, data);
+        return;
+    }
+
+    // ----------------------------------------------------------------
+    // Case 3: path == "/config/temp_min" → single field update
+    // Wrap thành {"fieldName": value} để parser dùng được
+    // ----------------------------------------------------------------
+    char group[32] = {};
+    size_t gLen = (size_t)(slash - groupName);
+    if (gLen >= sizeof(group)) return;
+    memcpy(group, groupName, gLen);
+    const char* fieldName = slash + 1;
+
+    char wrapped[128];
+    snprintf(wrapped, sizeof(wrapped), "{\"%s\":%s}", fieldName, data);
+    LOG_DEBUG("FB", "Stream1 field: group=%s field=%s val=%s", group, fieldName, data);
+    applyGroup(group, wrapped);
 }
 
 // ================================================================
@@ -555,17 +580,22 @@ static void onStream1Result(AsyncResult& r) {
     }
     if (!r.available()) return;
 
-    // Cập nhật health timer
     _fbClient->_lastSettingsStreamMs = millis();
 
-    // Đọc RTDB result
     RealtimeDatabaseResult& RTDB = r.to<RealtimeDatabaseResult>();
+    if (RTDB.event() != "put" && RTDB.event() != "patch") return;
 
-    // Chỉ xử lý khi có data thay đổi
-    if (RTDB.event() == "put" || RTDB.event() == "patch") {
-        // r.c_str() trả về raw payload JSON
-        _fbClient->_onSettingsPayload(r.c_str());
-    }
+    // dataPath() = path tương đối so với node /settings, ví dụ:
+    //   "/"                → initial full dump khi connect/reconnect
+    //   "/config"          → sub-object config thay đổi
+    //   "/config/temp_min" → 1 field thay đổi
+    // r.c_str() = raw JSON value tại dataPath (trên AsyncResult, không phải RTDB)
+    const String& dataPath = RTDB.dataPath();
+    const char*   dataStr  = r.c_str();
+    if (!dataStr) return;
+
+    LOG_DEBUG("FB", "Stream1 path=%s", dataPath.c_str());
+    _fbClient->_onSettingsPayload(dataPath.c_str(), dataStr);
 }
 
 static void onStream2Result(AsyncResult& r) {

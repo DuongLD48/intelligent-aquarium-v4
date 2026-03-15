@@ -1,4 +1,5 @@
 #include "oled_display.h"
+#include "button_manager.h"
 #include "logger.h"
 #include <WiFi.h>
 #include <Wire.h>
@@ -10,18 +11,21 @@
 //
 // SSD1306 128×64 SPI
 // CLK→14  MOSI→26  RES→27  DC→15  CS→21
+//
+// Menu navigation 4 nút:
+//   UP/DOWN = di chuyển  |  SELECT = vào/xác nhận  |  BACK = quay lại
 // ================================================================
 
-// Global singleton
 OledDisplay oledDisplay;
 
-// SSD1306 SPI constructor: width, height, mosi, clk, dc, rst, cs
 OledDisplay::OledDisplay()
     : _display(128, 64,
                PIN_OLED_MOSI, PIN_OLED_CLK,
                PIN_OLED_DC,   PIN_OLED_RES, PIN_OLED_CS),
-      _page(OledPage::PAGE_SENSORS),
-      _lastRenderMs(0)
+      _screen(UiScreen::HOME),
+      _cursor(0),
+      _lastRenderMs(0),
+      _wcConfirmPending(false)
 {}
 
 // ----------------------------------------------------------------
@@ -35,22 +39,112 @@ bool OledDisplay::begin() {
     _display.setTextSize(1);
 
     // Splash screen
-    _display.setCursor(20, 20);
+    _display.setCursor(12, 18);
     _display.print("Intelligent Aquarium");
-    _display.setCursor(40, 36);
+    _display.setCursor(40, 32);
     _display.print("v4.0  booting...");
+    _display.setCursor(16, 48);
+    _display.print("UP DN SEL BCK ready");
     _display.display();
     delay(1500);
-
     _display.clearDisplay();
     _display.display();
 
-    LOG_INFO("OLED", "SSD1306 init OK");
+    LOG_INFO("OLED", "SSD1306 init OK — 4-button menu mode");
     return true;
 }
 
 // ================================================================
-// UPDATE — render throttle 500ms
+// handleButtons — gọi sau buttonManager.update() trong loop()
+// Trả true nếu user xác nhận thay nước thủ công
+// ================================================================
+bool OledDisplay::handleButtons() {
+    bool wcTriggered = false;
+
+    switch (_screen) {
+
+    // ── HOME ─────────────────────────────────────────────────────
+    // cursor 0 = INFO, cursor 1 = ACTIONS
+    case UiScreen::HOME:
+        if (buttonManager.wasPressed(BtnId::UP))   { if (_cursor > 0) _cursor--; }
+        if (buttonManager.wasPressed(BtnId::DOWN))  { if (_cursor < 1) _cursor++; }
+        if (buttonManager.wasPressed(BtnId::SELECT)) {
+            if (_cursor == 0) _goTo(UiScreen::INFO_MENU);
+            else              _goTo(UiScreen::ACTIONS_MENU);
+        }
+        // BACK ở HOME không làm gì (đã ở root)
+        break;
+
+    // ── INFO MENU ────────────────────────────────────────────────
+    // cursor 0..3 → 4 trang xem
+    case UiScreen::INFO_MENU:
+        if (buttonManager.wasPressed(BtnId::UP))   { if (_cursor > 0) _cursor--; }
+        if (buttonManager.wasPressed(BtnId::DOWN))  { _clampCursor(4); _cursor++; _clampCursor(4); }
+        if (buttonManager.wasPressed(BtnId::SELECT)) {
+            switch (_cursor) {
+                case 0: _goTo(UiScreen::VIEW_SENSORS);   break;
+                case 1: _goTo(UiScreen::VIEW_ANALYTICS); break;
+                case 2: _goTo(UiScreen::VIEW_RELAYS);    break;
+                case 3: _goTo(UiScreen::VIEW_SYSTEM);    break;
+            }
+        }
+        if (buttonManager.wasPressed(BtnId::BACK)) _goTo(UiScreen::HOME);
+        break;
+
+    // ── VIEW PAGES — UP/DOWN cuộn (nếu sau này thêm scroll) ─────
+    case UiScreen::VIEW_SENSORS:
+    case UiScreen::VIEW_ANALYTICS:
+    case UiScreen::VIEW_RELAYS:
+    case UiScreen::VIEW_SYSTEM:
+        // UP/DOWN có thể dùng để chuyển trang nhanh
+        if (buttonManager.wasPressed(BtnId::UP)) {
+            uint8_t s = (uint8_t)_screen;
+            if (s > (uint8_t)UiScreen::VIEW_SENSORS) _screen = (UiScreen)(s - 1);
+        }
+        if (buttonManager.wasPressed(BtnId::DOWN)) {
+            uint8_t s = (uint8_t)_screen;
+            if (s < (uint8_t)UiScreen::VIEW_SYSTEM) _screen = (UiScreen)(s + 1);
+        }
+        if (buttonManager.wasPressed(BtnId::BACK)) _goTo(UiScreen::INFO_MENU);
+        if (buttonManager.wasPressed(BtnId::SELECT)) _goTo(UiScreen::INFO_MENU);
+        break;
+
+    // ── ACTIONS MENU ─────────────────────────────────────────────
+    // cursor 0 = Water Change (có thể thêm action sau)
+    case UiScreen::ACTIONS_MENU:
+        if (buttonManager.wasPressed(BtnId::UP))   { if (_cursor > 0) _cursor--; }
+        if (buttonManager.wasPressed(BtnId::DOWN))  { if (_cursor < 0) _cursor++; } // max khi thêm action
+        if (buttonManager.wasPressed(BtnId::SELECT)) {
+            if (_cursor == 0) _goTo(UiScreen::ACT_WATER_CHANGE);
+        }
+        if (buttonManager.wasPressed(BtnId::BACK)) _goTo(UiScreen::HOME);
+        break;
+
+    // ── ACT: WATER CHANGE — xác nhận 2 bước ─────────────────────
+    //  cursor 0 = YES, cursor 1 = NO
+    case UiScreen::ACT_WATER_CHANGE:
+        if (buttonManager.wasPressed(BtnId::UP))   { if (_cursor > 0) _cursor--; }
+        if (buttonManager.wasPressed(BtnId::DOWN))  { if (_cursor < 1) _cursor++; }
+        if (buttonManager.wasPressed(BtnId::SELECT)) {
+            if (_cursor == 0) {
+                wcTriggered = true;
+                LOG_INFO("OLED", "Water change confirmed via menu");
+            }
+            _goTo(UiScreen::HOME);  // về HOME sau xác nhận hoặc hủy
+        }
+        if (buttonManager.wasPressed(BtnId::BACK)) _goTo(UiScreen::ACTIONS_MENU);
+        break;
+
+    default:
+        _goTo(UiScreen::HOME);
+        break;
+    }
+
+    return wcTriggered;
+}
+
+// ================================================================
+// UPDATE — render throttle 200ms
 // ================================================================
 void OledDisplay::update(
     const CleanReading&    clean,
@@ -60,276 +154,346 @@ void OledDisplay::update(
     bool                   wifiConnected,
     bool                   safeMode
 ) {
+    // Cache dữ liệu mới nhất
+    _pClean    = &clean;
+    _pAnalytics = &aResult;
+    _pRelay    = &relayState;
+    _wcState   = wcState;
+    _wifi      = wifiConnected;
+    _safeMode  = safeMode;
+
     uint32_t now = millis();
     if (now - _lastRenderMs < RENDER_INTERVAL_MS) return;
     _lastRenderMs = now;
 
     _display.clearDisplay();
-
-    // Header: tên trang + trang số
     _display.setTextSize(1);
-    _display.setCursor(0, 0);
-    switch (_page) {
-        case OledPage::PAGE_SENSORS:   _display.print("SENSORS");   break;
-        case OledPage::PAGE_ANALYTICS: _display.print("ANALYTICS"); break;
-        case OledPage::PAGE_RELAY:     _display.print("RELAYS");    break;
-        case OledPage::PAGE_SYSTEM:    _display.print("SYSTEM");    break;
-        default: break;
-    }
-    // Số trang ở góc phải: "1/4"
-    char pgStr[6];
-    snprintf(pgStr, sizeof(pgStr), "%d/4", (int)_page + 1);
-    _display.setCursor(128 - strlen(pgStr) * 6, 0);
-    _display.print(pgStr);
 
-    // Đường kẻ ngang phân cách header
-    _display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
-
-    // Render nội dung trang
-    switch (_page) {
-        case OledPage::PAGE_SENSORS:
-            _renderSensors(clean, wcState);
-            break;
-        case OledPage::PAGE_ANALYTICS:
-            _renderAnalytics(aResult);
-            break;
-        case OledPage::PAGE_RELAY:
-            _renderRelay(relayState, wcState);
-            break;
-        case OledPage::PAGE_SYSTEM:
-            _renderSystem(wifiConnected, safeMode);
-            break;
-        default: break;
+    switch (_screen) {
+        case UiScreen::HOME:             _renderHome();           break;
+        case UiScreen::INFO_MENU:        _renderInfoMenu();       break;
+        case UiScreen::VIEW_SENSORS:     _renderViewSensors();    break;
+        case UiScreen::VIEW_ANALYTICS:   _renderViewAnalytics();  break;
+        case UiScreen::VIEW_RELAYS:      _renderViewRelays();     break;
+        case UiScreen::VIEW_SYSTEM:      _renderViewSystem();     break;
+        case UiScreen::ACTIONS_MENU:     _renderActionsMenu();    break;
+        case UiScreen::ACT_WATER_CHANGE: _renderActWaterChange(); break;
+        default: _renderHome(); break;
     }
 
     _display.display();
 }
 
 // ================================================================
-// PAGE 1 — SENSORS
-// Layout 128×54 (dưới header):
-//   T:  25.4°C  [M]
-//   pH:  7.02   [M]
-//   TDS: 285ppm [M]
-//   WATER: PUMPING_OUT   (hoặc IDLE)
+// ── RENDER FUNCTIONS ─────────────────────────────────────────────
 // ================================================================
-void OledDisplay::_renderSensors(const CleanReading& clean, WaterChangeState wcState) {
-    _display.setTextSize(1);
-    int16_t y = 12;
-    char buf[32];
 
-    // Nhiệt độ
-    snprintf(buf, sizeof(buf), "T:  %5.1f%cC [%c%c]",
-             clean.temperature, 0xF8,  // 0xF8 = degree symbol trong font Adafruit
-             _sourceChar(clean.source_temperature),
-             _statusChar(clean.status_temperature));
-    _display.setCursor(0, y); _display.print(buf);
-    y += 10;
-
-    // pH
-    snprintf(buf, sizeof(buf), "pH: %5.2f   [%c%c]",
-             clean.ph,
-             _sourceChar(clean.source_ph),
-             _statusChar(clean.status_ph));
-    _display.setCursor(0, y); _display.print(buf);
-    y += 10;
-
-    // TDS
-    snprintf(buf, sizeof(buf), "TDS:%4.0fppm [%c%c]",
-             clean.tds,
-             _sourceChar(clean.source_tds),
-             _statusChar(clean.status_tds));
-    _display.setCursor(0, y); _display.print(buf);
-    y += 10;
-
-    // Shock indicator
-    if (clean.has_shock()) {
-        _display.setCursor(0, y);
-        _display.print("! SHOCK ");
-        if (clean.shock_temperature) _display.print("T ");
-        if (clean.shock_ph)          _display.print("pH");
-        y += 10;
+// ----------------------------------------------------------------
+// HOME — tóm tắt nhanh + chọn INFO / ACTIONS
+// ┌────────────────────────┐
+// │ AQUARIUM v4  [WiFi]    │
+// ├────────────────────────┤
+// │ T:26.2 pH:7.02 TDS:285 │
+// │ WC: IDLE               │
+// ├────────────────────────┤
+// │ > [INFO]               │
+// │   [ACTIONS]            │
+// └────────────────────────┘
+// ----------------------------------------------------------------
+void OledDisplay::_renderHome() {
+    // Header
+    _display.setCursor(0, 0);
+    _display.print("AQUARIUM v4");
+    if (_wifi) {
+        _display.setCursor(96, 0);
+        _display.print("WiFi");
     }
+    _display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
 
-    // Water change state
-    _display.setCursor(0, y);
+    // Sensor summary line
+    char buf[32];
+    if (_pClean) {
+        snprintf(buf, sizeof(buf), "T:%.1f pH:%.2f TDS:%.0f",
+                 _pClean->temperature, _pClean->ph, _pClean->tds);
+    } else {
+        snprintf(buf, sizeof(buf), "T:-- pH:-- TDS:--");
+    }
+    _display.setCursor(0, 12);
+    _display.print(buf);
+
+    // WC status
+    _display.setCursor(0, 22);
     _display.print("WC:");
-    switch (wcState) {
-        case WaterChangeState::IDLE:        _display.print("IDLE");         break;
-        case WaterChangeState::PUMPING_OUT: _display.print("PUMP OUT >>"); break;
-        case WaterChangeState::PUMPING_IN:  _display.print("PUMP IN  <<"); break;
-        case WaterChangeState::DONE:        _display.print("DONE");         break;
+    switch (_wcState) {
+        case WaterChangeState::IDLE:        _display.print("IDLE");      break;
+        case WaterChangeState::PUMPING_OUT: _display.print("PUMP OUT"); break;
+        case WaterChangeState::PUMPING_IN:  _display.print("PUMP IN");  break;
+        case WaterChangeState::DONE:        _display.print("DONE");      break;
+    }
+
+    // Safe mode warning
+    if (_safeMode) {
+        _display.setCursor(72, 22);
+        _display.print("!!SAFE!!");
+    }
+
+    _display.drawLine(0, 32, 127, 32, SSD1306_WHITE);
+
+    // Menu items
+    _drawMenuItem(35, _cursor == 0, "> INFO      (xem)");
+    _drawMenuItem(47, _cursor == 1, "> ACTIONS   (thao tac)");
+
+    // Footer hint
+    _display.setCursor(0, 57);
+    _display.print("UP/DN:chon  SEL:vao");
+}
+
+// ----------------------------------------------------------------
+// INFO MENU — chọn 1 trong 4 trang xem
+// ----------------------------------------------------------------
+void OledDisplay::_renderInfoMenu() {
+    _drawHeader("XEM THONG TIN", "SEL:vao  BCK:ve");
+
+    _drawMenuItem(13, _cursor == 0, "1. Sensors  T/pH/TDS");
+    _drawMenuItem(24, _cursor == 1, "2. Analytics WSI/FSI");
+    _drawMenuItem(35, _cursor == 2, "3. Relay    6 relay");
+    _drawMenuItem(46, _cursor == 3, "4. System   Heap/WiFi");
+}
+
+// ----------------------------------------------------------------
+// VIEW SENSORS
+// ----------------------------------------------------------------
+void OledDisplay::_renderViewSensors() {
+    _drawHeader("SENSORS  1/4", "UP/DN:trang  BCK:ve");
+
+    if (!_pClean) return;
+    const CleanReading& c = *_pClean;
+    char buf[28];
+    int16_t y = 13;
+
+    snprintf(buf, sizeof(buf), "T:  %5.1f%cC  [%c%c]",
+             c.temperature, 0xF8,
+             _sourceChar(c.source_temperature),
+             _statusChar(c.status_temperature));
+    _display.setCursor(0, y); _display.print(buf); y += 10;
+
+    snprintf(buf, sizeof(buf), "pH: %5.2f    [%c%c]",
+             c.ph,
+             _sourceChar(c.source_ph),
+             _statusChar(c.status_ph));
+    _display.setCursor(0, y); _display.print(buf); y += 10;
+
+    snprintf(buf, sizeof(buf), "TDS:%4.0fppm  [%c%c]",
+             c.tds,
+             _sourceChar(c.source_tds),
+             _statusChar(c.status_tds));
+    _display.setCursor(0, y); _display.print(buf); y += 10;
+
+    if (c.has_shock()) {
+        _display.setCursor(0, y);
+        _display.print("! SHOCK:");
+        if (c.shock_temperature) _display.print("T ");
+        if (c.shock_ph)          _display.print("pH");
     }
 }
 
-// ================================================================
-// PAGE 2 — ANALYTICS
-// Layout:
-//   EMA T:25.4  pH:7.02
-//   TDS:285
-//   WSI:[==========] 87
-//   FSI:[===       ] 12
-//   Drift: T:UP pH:-- TDS:--
-// ================================================================
-void OledDisplay::_renderAnalytics(const AnalyticsResult& r) {
-    _display.setTextSize(1);
-    int16_t y = 12;
-    char buf[32];
+// ----------------------------------------------------------------
+// VIEW ANALYTICS
+// ----------------------------------------------------------------
+void OledDisplay::_renderViewAnalytics() {
+    _drawHeader("ANALYTICS  2/4", "UP/DN:trang  BCK:ve");
 
-    // EMA values
+    if (!_pAnalytics) return;
+    const AnalyticsResult& r = *_pAnalytics;
+    char buf[28];
+    int16_t y = 13;
+
     snprintf(buf, sizeof(buf), "EMA T:%.1f pH:%.2f", r.ema_temp, r.ema_ph);
-    _display.setCursor(0, y); _display.print(buf);
-    y += 10;
+    _display.setCursor(0, y); _display.print(buf); y += 9;
 
-    snprintf(buf, sizeof(buf), "    TDS:%.0f ppm", r.ema_tds);
-    _display.setCursor(0, y); _display.print(buf);
-    y += 10;
+    snprintf(buf, sizeof(buf), "    TDS:%.0fppm", r.ema_tds);
+    _display.setCursor(0, y); _display.print(buf); y += 9;
 
-    // WSI bar
-    _display.setCursor(0, y);
-    _display.print("WSI:");
-    _drawBar(24, y, 80, 7, r.wsi);
+    _display.setCursor(0, y); _display.print("WSI:");
+    _drawBar(24, y, 76, 7, r.wsi);
     snprintf(buf, sizeof(buf), "%3.0f", r.wsi);
-    _display.setCursor(108, y); _display.print(buf);
-    y += 10;
+    _display.setCursor(104, y); _display.print(buf); y += 9;
 
-    // FSI bar (clamp hiển thị tối đa 100)
-    float fsiDisplay = r.fsi > 100.0f ? 100.0f : r.fsi;
-    _display.setCursor(0, y);
-    _display.print("FSI:");
-    _drawBar(24, y, 80, 7, fsiDisplay);
+    float fsiD = r.fsi > 100.0f ? 100.0f : r.fsi;
+    _display.setCursor(0, y); _display.print("FSI:");
+    _drawBar(24, y, 76, 7, fsiD);
     snprintf(buf, sizeof(buf), "%3.0f", r.fsi);
-    _display.setCursor(108, y); _display.print(buf);
-    y += 10;
+    _display.setCursor(104, y); _display.print(buf); y += 9;
 
-    // Drift status
-    snprintf(buf, sizeof(buf), "Drift T:%s pH:%s TDS:%s",
-             _driftStr(r.drift_temp),
-             _driftStr(r.drift_ph),
-             _driftStr(r.drift_tds));
+    snprintf(buf, sizeof(buf), "T:%s pH:%s TDS:%s",
+             _driftStr(r.drift_temp), _driftStr(r.drift_ph), _driftStr(r.drift_tds));
     _display.setCursor(0, y); _display.print(buf);
 }
 
-// ================================================================
-// PAGE 3 — RELAY
-// Layout: 2 cột × 3 hàng, mỗi relay có dot indicator
-//   [●] HEAT  [○] COOL
-//   [○] pH+   [○] pH-
-//   [○] IN    [○] OUT
-//   WC: PUMPING_OUT
-// ================================================================
-void OledDisplay::_renderRelay(const RelayCommand& cmd, WaterChangeState wcState) {
-    _display.setTextSize(1);
-    int16_t y = 12;
+// ----------------------------------------------------------------
+// VIEW RELAYS
+// ----------------------------------------------------------------
+void OledDisplay::_renderViewRelays() {
+    _drawHeader("RELAY  3/4", "UP/DN:trang  BCK:ve");
 
-    // Helper lambda-style: vẽ 1 relay cell
+    if (!_pRelay) return;
+    const RelayCommand& cmd = *_pRelay;
+    int16_t y = 13;
+
     auto drawRelay = [&](int16_t x, int16_t ry, bool on, const char* label) {
-        if (on) {
-            _display.fillCircle(x + 3, ry + 3, 3, SSD1306_WHITE);   // Dot đặc = ON
-        } else {
-            _display.drawCircle(x + 3, ry + 3, 3, SSD1306_WHITE);   // Dot rỗng = OFF
-        }
+        if (on) _display.fillCircle(x + 3, ry + 3, 3, SSD1306_WHITE);
+        else    _display.drawCircle(x + 3, ry + 3, 3, SSD1306_WHITE);
         _display.setCursor(x + 9, ry);
         _display.print(label);
     };
 
-    drawRelay(0,  y,      cmd.heater,   "HEAT");
-    drawRelay(64, y,      cmd.cooler,   "COOL");
-    y += 12;
+    drawRelay(0,  y, cmd.heater,   "HEAT");
+    drawRelay(64, y, cmd.cooler,   "COOL"); y += 12;
+    drawRelay(0,  y, cmd.ph_up,    "pH+ ");
+    drawRelay(64, y, cmd.ph_down,  "pH- "); y += 12;
+    drawRelay(0,  y, cmd.pump_in,  "IN  ");
+    drawRelay(64, y, cmd.pump_out, "OUT "); y += 12;
 
-    drawRelay(0,  y,      cmd.ph_up,    "pH+ ");
-    drawRelay(64, y,      cmd.ph_down,  "pH- ");
-    y += 12;
-
-    drawRelay(0,  y,      cmd.pump_in,  "IN  ");
-    drawRelay(64, y,      cmd.pump_out, "OUT ");
-    y += 12;
-
-    // Water change state
     _display.setCursor(0, y);
     _display.print("WC:");
-    switch (wcState) {
-        case WaterChangeState::IDLE:        _display.print("idle");      break;
+    switch (_wcState) {
+        case WaterChangeState::IDLE:        _display.print("idle");     break;
         case WaterChangeState::PUMPING_OUT: _display.print("pump-out"); break;
         case WaterChangeState::PUMPING_IN:  _display.print("pump-in");  break;
-        case WaterChangeState::DONE:        _display.print("done");      break;
+        case WaterChangeState::DONE:        _display.print("done");     break;
     }
 }
 
-// ================================================================
-// PAGE 4 — SYSTEM
-// Layout:
-//   Up: 2d 04:32:15
-//   Heap: 218432 B
-//   WiFi: OK (-72dBm)
-//   Mode: NORMAL
-// ================================================================
-void OledDisplay::_renderSystem(bool wifiConnected, bool safeMode) {
-    _display.setTextSize(1);
-    int16_t y = 12;
-    char buf[32];
+// ----------------------------------------------------------------
+// VIEW SYSTEM
+// ----------------------------------------------------------------
+void OledDisplay::_renderViewSystem() {
+    _drawHeader("SYSTEM  4/4", "UP/DN:trang  BCK:ve");
 
-    // Uptime
+    char buf[28];
+    int16_t y = 13;
+
     uint32_t upSec  = millis() / 1000;
     uint32_t upDay  = upSec / 86400; upSec %= 86400;
-    uint32_t upHour = upSec / 3600;  upSec %= 3600;
+    uint32_t upHr   = upSec / 3600;  upSec %= 3600;
     uint32_t upMin  = upSec / 60;    upSec %= 60;
-    snprintf(buf, sizeof(buf), "Up: %lud %02lu:%02lu:%02lu",
-             (unsigned long)upDay, (unsigned long)upHour,
+    snprintf(buf, sizeof(buf), "Up:%lud %02lu:%02lu:%02lu",
+             (unsigned long)upDay, (unsigned long)upHr,
              (unsigned long)upMin, (unsigned long)upSec);
-    _display.setCursor(0, y); _display.print(buf);
-    y += 10;
+    _display.setCursor(0, y); _display.print(buf); y += 10;
 
-    // Heap
     snprintf(buf, sizeof(buf), "Heap: %lu B", (unsigned long)ESP.getFreeHeap());
-    _display.setCursor(0, y); _display.print(buf);
-    y += 10;
+    _display.setCursor(0, y); _display.print(buf); y += 10;
 
-    // WiFi
-    if (wifiConnected) {
-        snprintf(buf, sizeof(buf), "WiFi: OK (%ddBm)", WiFi.RSSI());
-    } else {
-        snprintf(buf, sizeof(buf), "WiFi: --");
-    }
-    _display.setCursor(0, y); _display.print(buf);
-    y += 10;
+    if (_wifi) snprintf(buf, sizeof(buf), "WiFi: OK (%ddBm)", WiFi.RSSI());
+    else       snprintf(buf, sizeof(buf), "WiFi: disconnected");
+    _display.setCursor(0, y); _display.print(buf); y += 10;
 
-    // System mode
     _display.setCursor(0, y);
-    if (safeMode) {
-        _display.print("Mode: !! SAFE MODE !!");
-    } else {
-        _display.print("Mode: NORMAL");
+    _display.print(_safeMode ? "Mode: !! SAFE MODE !!" : "Mode: NORMAL");
+}
+
+// ----------------------------------------------------------------
+// ACTIONS MENU
+// ----------------------------------------------------------------
+void OledDisplay::_renderActionsMenu() {
+    _drawHeader("THAO TAC", "SEL:chon  BCK:ve");
+
+    _drawMenuItem(18, _cursor == 0, "> Thay nuoc thu cong");
+
+    // Footer mô tả action được chọn
+    _display.drawLine(0, 45, 127, 45, SSD1306_WHITE);
+    _display.setCursor(0, 48);
+    if (_cursor == 0) {
+        switch (_wcState) {
+            case WaterChangeState::IDLE:
+                _display.print("WC: san sang"); break;
+            case WaterChangeState::PUMPING_OUT:
+            case WaterChangeState::PUMPING_IN:
+                _display.print("WC: dang chay!"); break;
+            case WaterChangeState::DONE:
+                _display.print("WC: vua xong"); break;
+        }
+    }
+}
+
+// ----------------------------------------------------------------
+// ACT: WATER CHANGE CONFIRM
+// ┌────────────────────────┐
+// │   THAY NUOC THU CONG   │
+// ├────────────────────────┤
+// │  Xac nhan bat dau?     │
+// │                        │
+// │  > [YES] Bat dau ngay  │
+// │    [NO ] Huy bo        │
+// └────────────────────────┘
+// ----------------------------------------------------------------
+void OledDisplay::_renderActWaterChange() {
+    _drawHeader("THAY NUOC", "SEL:ok  BCK:huy");
+
+    _display.setCursor(8, 14);
+    _display.print("Xac nhan bat dau?");
+
+    _display.drawLine(0, 24, 127, 24, SSD1306_WHITE);
+
+    _drawMenuItem(27, _cursor == 0, "[YES] Bat dau ngay");
+    _drawMenuItem(39, _cursor == 1, "[NO ] Huy bo");
+
+    // Warning nếu WC đang chạy
+    if (_wcState != WaterChangeState::IDLE &&
+        _wcState != WaterChangeState::DONE) {
+        _display.setCursor(0, 53);
+        _display.print("! WC dang hoat dong");
     }
 }
 
 // ================================================================
-// HELPERS
+// ── HELPERS ──────────────────────────────────────────────────────
 // ================================================================
 
-void OledDisplay::nextPage() {
-    uint8_t next = ((uint8_t)_page + 1) % (uint8_t)OledPage::PAGE_COUNT;
-    _page = (OledPage)next;
-    LOG_DEBUG("OLED", "Page → %d", (int)_page);
+void OledDisplay::_drawHeader(const char* title, const char* hint) {
+    _display.setCursor(0, 0);
+    _display.print(title);
+    if (hint) {
+        // Hiển thị hint nhỏ ở dưới cùng
+        _display.setCursor(0, 57);
+        _display.print(hint);
+    }
+    _display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
 }
 
-void OledDisplay::setPage(OledPage p) {
-    _page = p;
+void OledDisplay::_drawMenuItem(int16_t y, bool selected, const char* label) {
+    if (selected) {
+        // Highlight: vẽ hình chữ nhật đặc làm nền
+        _display.fillRect(0, y - 1, 128, 10, SSD1306_WHITE);
+        _display.setTextColor(SSD1306_BLACK);
+        _display.setCursor(2, y);
+        _display.print(label);
+        _display.setTextColor(SSD1306_WHITE);
+    } else {
+        _display.setCursor(2, y);
+        _display.print(label);
+    }
 }
 
-// Thanh progress ngang
 void OledDisplay::_drawBar(int16_t x, int16_t y, int16_t w, int16_t h, float pct) {
-    // Border
     _display.drawRect(x, y, w, h, SSD1306_WHITE);
-    // Fill
     if (pct > 0.0f) {
         int16_t fillW = (int16_t)(pct / 100.0f * (float)(w - 2));
         if (fillW < 0)   fillW = 0;
         if (fillW > w-2) fillW = w - 2;
-        if (fillW > 0) {
-            _display.fillRect(x + 1, y + 1, fillW, h - 2, SSD1306_WHITE);
-        }
+        if (fillW > 0)   _display.fillRect(x + 1, y + 1, fillW, h - 2, SSD1306_WHITE);
     }
+}
+
+void OledDisplay::_goTo(UiScreen s, uint8_t cursor) {
+    LOG_DEBUG("OLED", "Screen %d → %d", (int)_screen, (int)s);
+    _screen = s;
+    _cursor = cursor;
+}
+
+void OledDisplay::_clampCursor(uint8_t maxItems) {
+    if (_cursor >= maxItems) _cursor = maxItems - 1;
 }
 
 char OledDisplay::_sourceChar(DataSource src) const {

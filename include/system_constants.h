@@ -12,7 +12,6 @@
 #define PIN_DS18B20     4   // OneWire — nhiệt độ DS18B20
 #define PIN_PH_ADC      34  // ADC input-only — pH analog
 #define PIN_TDS_ADC     35  // ADC input-only — TDS analog
-// ※ PIN_TRIG (16) và PIN_ECHO (17) đã bỏ (HC-SR04 loại bỏ)
 
 // ----------------------------------------------------------------
 // RELAY PINS (active LOW)
@@ -34,14 +33,36 @@
 #define PIN_OLED_CS     21
 
 // ----------------------------------------------------------------
-// BUTTON PINS (INPUT_PULLUP, nhấn = LOW)
+// BUTTON PINS — 4 nút điều hướng (INPUT_PULLUP, nhấn = LOW)
+// ↑↓ = di chuyển trong menu, SELECT = vào/xác nhận, BACK = quay lại
 // ----------------------------------------------------------------
-#define PIN_BTN_PAGE          25
-#define PIN_BTN_UP            33
-#define PIN_BTN_DOWN          32
-#define PIN_BTN_SELECT        22  // ĐỔI từ GPIO 15 — tránh trùng OLED DC
-#define PIN_BTN_BACK          0   // Boot pin — cẩn thận
-#define PIN_BTN_WATER_CHANGE  2   // Nút bấm thay nước thủ công
+#define PIN_BTN_UP      33  // GPIO 33 — ↑ di chuyển lên
+#define PIN_BTN_DOWN    32  // GPIO 32 — ↓ di chuyển xuống
+#define PIN_BTN_SELECT  22  // GPIO 22 — vào menu / xác nhận
+#define PIN_BTN_BACK    25  // GPIO 25 — quay lại màn hình trước
+
+// ----------------------------------------------------------------
+// PIN CONFLICT CHECK (tất cả các GPIO đang dùng)
+//  4  → DS18B20 (OneWire)
+//  5  → RELAY pH-
+// 12  → RELAY PUMP_OUT
+// 13  → RELAY PUMP_IN
+// 14  → OLED CLK
+// 15  → OLED DC
+// 18  → RELAY pH+
+// 19  → RELAY COOLER
+// 21  → OLED CS
+// 22  → BTN SELECT      ✓ no conflict
+// 23  → RELAY HEATER
+// 25  → BTN BACK        ✓ no conflict (PIN_BTN_PAGE đã xóa)
+// 26  → OLED MOSI
+// 27  → OLED RES
+// 32  → BTN DOWN        ✓ no conflict
+// 33  → BTN UP          ✓ no conflict
+// 34  → pH ADC (input-only)
+// 35  → TDS ADC (input-only)
+// Đã giải phóng: GPIO 0 (BTN_BACK cũ), GPIO 2 (BTN_WATER_CHANGE cũ)
+// ----------------------------------------------------------------
 
 // ----------------------------------------------------------------
 // SENSOR TIMING
@@ -52,23 +73,23 @@
 // ----------------------------------------------------------------
 // WATER CHANGE DEFAULTS
 // ----------------------------------------------------------------
-#define WATER_CHANGE_DEFAULT_PUMP_OUT_SEC   30   // Bơm ra mặc định 30 giây
-#define WATER_CHANGE_DEFAULT_PUMP_IN_SEC    60   // Bơm vào mặc định 60 giây
+#define WATER_CHANGE_DEFAULT_PUMP_OUT_SEC   30
+#define WATER_CHANGE_DEFAULT_PUMP_IN_SEC    60
 
 // ----------------------------------------------------------------
 // PH CALIBRATION
 // ----------------------------------------------------------------
-#define PH_CALIB_SLOPE    (-3.5f)   // slope voltage→pH
-#define PH_CALIB_OFFSET   (2.50f)   // offset
+#define PH_CALIB_SLOPE    (-3.5f)
+#define PH_CALIB_OFFSET   (2.50f)
 
 // ----------------------------------------------------------------
 // TDS CALIBRATION
 // ----------------------------------------------------------------
-#define TDS_CALIB_FACTOR  (1.0f)    // hệ số nhân TDS
+#define TDS_CALIB_FACTOR  (1.0f)
 
 // ----------------------------------------------------------------
 // NTP / TIME
 // ----------------------------------------------------------------
-#define NTP_SERVER          "pool.ntp.org"
-#define NTP_GMT_OFFSET_SEC  25200   // UTC+7 (Việt Nam)
+#define NTP_SERVER              "pool.ntp.org"
+#define NTP_GMT_OFFSET_SEC      25200   // UTC+7 (Việt Nam)
 #define NTP_DAYLIGHT_OFFSET_SEC 0

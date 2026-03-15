@@ -6,29 +6,25 @@
 // button_manager.h
 // Intelligent Aquarium v4.0
 //
-// Quản lý 6 nút bấm với debounce 50ms.
-// wasPressed(id) → true đúng 1 lần sau khi nhấn (edge detect).
+// Quản lý 4 nút điều hướng kiểu menu điện thoại đời cũ:
+//   UP     (GPIO 33) → di chuyển lên  ↑
+//   DOWN   (GPIO 32) → di chuyển xuống ↓
+//   SELECT (GPIO 22) → vào menu / xác nhận
+//   BACK   (GPIO 25) → quay lại màn hình trước
 //
-// Nút:
-//   BTN_PAGE         → GPIO 25
-//   BTN_UP           → GPIO 33
-//   BTN_DOWN         → GPIO 32
-//   BTN_SELECT       → GPIO 22  (đổi từ 15, tránh trùng OLED DC)
-//   BTN_BACK         → GPIO 0   (boot pin, cẩn thận)
-//   BTN_WATER_CHANGE → GPIO 2   (kích hoạt thay nước thủ công)
+// wasPressed(id) → true đúng 1 lần sau khi nhấn (edge detect).
+// Debounce 50ms.
 // ================================================================
 
 // ----------------------------------------------------------------
 // BUTTON ID ENUM
 // ----------------------------------------------------------------
 enum class BtnId : uint8_t {
-    PAGE         = 0,
-    UP           = 1,
-    DOWN         = 2,
-    SELECT       = 3,
-    BACK         = 4,
-    WATER_CHANGE = 5,
-    COUNT        = 6
+    UP     = 0,
+    DOWN   = 1,
+    SELECT = 2,
+    BACK   = 3,
+    COUNT  = 4
 };
 
 // ----------------------------------------------------------------
@@ -38,32 +34,29 @@ class ButtonManager {
 public:
     ButtonManager();
 
-    // Gọi trong setup(): pinMode INPUT_PULLUP cho cả 6 nút
+    // Gọi trong setup(): pinMode INPUT_PULLUP cho 4 nút
     void begin();
 
     // Gọi đầu mỗi loop(): cập nhật trạng thái và debounce
     void update();
 
     // Trả true đúng 1 lần sau khi nút được nhấn (falling edge)
-    // Tự reset flag sau khi đọc
     bool wasPressed(BtnId id);
 
-    // Kiểm tra nút đang giữ (raw, không debounce)
+    // Kiểm tra nút đang giữ (debounced)
     bool isHeld(BtnId id) const;
 
 private:
-    static constexpr uint8_t  BTN_COUNT      = (uint8_t)BtnId::COUNT;
-    static constexpr uint32_t DEBOUNCE_MS    = 50;
+    static constexpr uint8_t  BTN_COUNT   = (uint8_t)BtnId::COUNT;
+    static constexpr uint32_t DEBOUNCE_MS = 50;
 
-    // GPIO pin tương ứng với từng BtnId
     static const uint8_t _pins[BTN_COUNT];
 
     struct BtnState {
-        bool     raw;          // Trạng thái raw hiện tại (LOW = nhấn)
-        bool     debounced;    // Trạng thái sau debounce
-        bool     lastDebounced;// Trạng thái debounced chu kỳ trước
-        bool     pressedFlag;  // Flag "vừa nhấn" — đọc 1 lần rồi reset
-        uint32_t lastChangeMs; // millis() lúc raw thay đổi
+        bool     raw;
+        bool     debounced;
+        bool     pressedFlag;
+        uint32_t lastChangeMs;
     };
 
     BtnState _states[BTN_COUNT];

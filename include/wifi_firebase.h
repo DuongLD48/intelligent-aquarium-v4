@@ -112,7 +112,8 @@ public:
     // Không gọi trực tiếp từ bên ngoài
     uint32_t _lastSettingsStreamMs;
     uint32_t _lastTriggerStreamMs;
-    void _onSettingsPayload(const char* json);
+    // path = RTDB.dataPath(), data = r.c_str() từ SSE event
+    void _onSettingsPayload(const char* path, const char* data);
     void _onTriggerPayload (bool triggered);
 
 private:

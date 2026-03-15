@@ -66,8 +66,9 @@ public:
     const PipelineConfig&       getPipelineConfig()  const { return _pipe; }
     const WaterChangeSchedule&  getWaterSchedule()   const { return _water; }
 
-    // ---- Apply từ Firebase (gọi từ wifi_firebase callback) ----
-    // Validate trước khi cập nhật RAM và lưu NVS
+    // ---- Apply từ Firebase / Serial ----
+    // Validate → cập nhật RAM → lưu NVS → propagate ngay đến controller/pipeline
+    // Caller KHÔNG cần gọi thêm setConfig() trên controller sau khi apply thành công.
     bool applyControlConfig(const ControlConfig& cfg);
     bool applyPipelineConfig(const PipelineConfig& cfg);
     bool applyWaterSchedule(const WaterChangeSchedule& sched);

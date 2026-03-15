@@ -1,4 +1,5 @@
 #include "water_change_manager.h"
+#include "config_manager.h"
 #include "system_constants.h"
 #include "logger.h"
 #include <time.h>
@@ -22,6 +23,7 @@ WaterChangeManager::WaterChangeManager()
     : _state(WaterChangeState::IDLE),
       _stateStartMs(0),
       _lastRunDay(0),
+      _lastRunTs(0),
       _manualTrigger(false)
 {}
 
@@ -30,11 +32,26 @@ void WaterChangeManager::begin() {
     _state         = WaterChangeState::IDLE;
     _stateStartMs  = 0;
     _lastRunDay    = 0;
+    _lastRunTs     = 0;
     _manualTrigger = false;
     LOG_INFO("WATER", "WaterChangeManager init: out=%ds in=%ds schedule=%s %02d:%02d",
              _cfg.pump_out_sec, _cfg.pump_in_sec,
              _cfg.schedule_enabled ? "ON" : "OFF",
              _cfg.schedule_hour, _cfg.schedule_minute);
+}
+
+// ----------------------------------------------------------------
+// RESTORE LAST RUN — gọi từ system_manager::begin() sau begin()
+// Khôi phục _lastRunDay và _lastRunTs từ NVS để tránh trigger
+// lại trong ngày đã chạy sau khi reboot.
+// ----------------------------------------------------------------
+void WaterChangeManager::restoreLastRun(uint32_t savedDay, uint32_t savedTs) {
+    if (savedDay > 0) {
+        _lastRunDay = savedDay;
+        _lastRunTs  = savedTs;
+        LOG_INFO("WATER", "Restored lastRunDay=%lu lastRunTs=%lu (from NVS)",
+                 (unsigned long)_lastRunDay, (unsigned long)_lastRunTs);
+    }
 }
 
 // ----------------------------------------------------------------
@@ -109,6 +126,9 @@ void WaterChangeManager::_tick() {
             }
             // Ưu tiên 2: lịch tự động
             if (_cfg.schedule_enabled && _isScheduleTime()) {
+                // FIX: Set _lastRunDay ngay khi bắt đầu (không chờ PUMPING_IN xong)
+                // Đảm bảo nếu reboot giữa chừng sẽ không trigger lại trong ngày hôm nay
+                _lastRunDay = _todayDay();
                 _setState(WaterChangeState::PUMPING_OUT);
                 _stateStartMs = millis();
                 LOG_INFO("WATER", "Schedule trigger → PUMPING_OUT (%ds)", _cfg.pump_out_sec);
@@ -130,18 +150,30 @@ void WaterChangeManager::_tick() {
         case WaterChangeState::PUMPING_IN:
             // Relay pump_in ON được set bởi getRelayCmd()
             if ((now - _stateStartMs) >= (uint32_t)_cfg.pump_in_sec * 1000UL) {
-                // Hết thời gian bơm vào → hoàn thành
-                _lastRunDay = _todayDay();
+                // Ghi timestamp đầy đủ để Firebase/web hiển thị ngày giờ phút
+                _lastRunTs  = (uint32_t)time(nullptr);
+                // _lastRunDay: đã set khi bắt đầu (schedule) hoặc set tại đây (manual)
+                if (_lastRunDay == 0 || _lastRunDay != _todayDay()) {
+                    _lastRunDay = _todayDay();
+                }
                 _setState(WaterChangeState::DONE);
-                LOG_INFO("WATER", "PUMPING_IN done → DONE (lastRunDay=%lu)", _lastRunDay);
+                LOG_INFO("WATER", "PUMPING_IN done → DONE (lastRunDay=%lu ts=%lu)",
+                         (unsigned long)_lastRunDay, (unsigned long)_lastRunTs);
             }
             break;
 
         // --------------------------------------------------------
         case WaterChangeState::DONE:
+            // Lưu last_run vào NVS ngay lập tức để reboot sau đó không chạy lại
+            {
+                WaterChangeSchedule sched = configManager.getWaterSchedule();
+                sched.last_run_day = _lastRunDay;
+                sched.last_run_ts  = _lastRunTs;
+                configManager.saveWaterSchedule(sched);
+            }
             // Chuyển về IDLE ngay lập tức ở tick tiếp theo
             _setState(WaterChangeState::IDLE);
-            LOG_INFO("WATER", "Water change complete ✓ → IDLE");
+            LOG_INFO("WATER", "Water change complete ✓ → IDLE (persisted to NVS)");
             break;
     }
 }
@@ -214,11 +246,12 @@ void WaterChangeManager::getRelayCmd(bool& pump_out, bool& pump_in) const {
 // GET STATUS JSON — cho Firebase upload
 // ================================================================
 String WaterChangeManager::getStatusJson() const {
-    char buf[128];
+    char buf[160];
     snprintf(buf, sizeof(buf),
-             "{\"state\":\"%s\",\"last_run_day\":%lu,\"busy\":%s}",
+             "{\"state\":\"%s\",\"last_run_day\":%lu,\"last_run_ts\":%lu,\"busy\":%s}",
              _stateName(_state),
              (unsigned long)_lastRunDay,
+             (unsigned long)_lastRunTs,
              isBusy() ? "true" : "false");
     return String(buf);
 }

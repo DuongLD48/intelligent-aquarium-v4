@@ -11,8 +11,12 @@
 // quản lý watchdog và safe mode.
 //
 // Safe mode triggers:
-//   - Mất temp > 60s (fallback_count_temp vượt ngưỡng liên tục)
+//   - Temp + pH cùng mất (fallback_count >= stale_threshold * 2)
 //   - FSI > 50 liên tục 5 chu kỳ
+//
+// Safe mode exit:
+//   - Multi-sensor: khi temp HOẶC pH phục hồi
+//   - FSI: khi FSI về bình thường
 //
 // Safe mode: tắt tất cả relay, vẫn đọc sensor + gửi telemetry
 // ================================================================
@@ -48,6 +52,7 @@ public:
 private:
     bool     _safeMode;
     bool     _ntpSynced;
+    bool     _multiSensorLost;    // true = safe mode do temp + pH cùng mất
     uint8_t  _highFsiCount;       // Số chu kỳ liên tiếp FSI > 50
     uint32_t _lastNtpAttemptMs;
 

@@ -1,9 +1,19 @@
 #include "config_manager.h"
 #include "logger.h"
+#include "hysteresis_controller.h"
+#include "pid_controller.h"
+#include "data_pipeline.h"
+#include "water_change_manager.h"
 #include <Preferences.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+
+// Forward-declared globals (defined in their respective .cpp files)
+extern HysteresisController hysteresisCtrl;
+extern PidController        pidCtrl;
+extern DataPipeline         dataPipeline;
+extern WaterChangeManager   waterChangeManager;
 
 // ================================================================
 // config_manager.cpp
@@ -341,7 +351,16 @@ bool ConfigManager::applyControlConfig(const ControlConfig& cfg) {
     }
     _ctrl = cfg;
     saveControlConfig(cfg);
-    LOG_INFO("CFG", "ControlConfig applied from Firebase");
+
+    // Propagate ngay đến các controller — tránh stale config sau khi Firebase update
+    hysteresisCtrl.setConfig(cfg);
+    pidCtrl.setConfig(cfg);
+
+    LOG_INFO("CFG", "ControlConfig applied → hysteresis+PID updated"
+             " (temp=[%.1f~%.1f] pH=[%.2f~%.2f] Kp=%.2f Ki=%.3f Kd=%.3f)",
+             cfg.temp_min, cfg.temp_max,
+             cfg.ph_min,   cfg.ph_max,
+             cfg.pid_kp,   cfg.pid_ki, cfg.pid_kd);
     return true;
 }
 
@@ -352,19 +371,44 @@ bool ConfigManager::applyPipelineConfig(const PipelineConfig& cfg) {
     }
     _pipe = cfg;
     savePipelineConfig(cfg);
-    LOG_INFO("CFG", "PipelineConfig applied from Firebase");
+
+    // Propagate ngay đến pipeline — tránh stale filter config
+    dataPipeline.setConfig(cfg);
+
+    LOG_INFO("CFG", "PipelineConfig applied → dataPipeline updated"
+             " (T=[%.1f~%.1f] pH=[%.1f~%.1f] TDS=[%.0f~%.0f] MAD thr=%.2f)",
+             cfg.temp_min, cfg.temp_max,
+             cfg.ph_min,   cfg.ph_max,
+             cfg.tds_min,  cfg.tds_max,
+             cfg.mad_threshold);
     return true;
 }
 
 bool ConfigManager::applyWaterSchedule(const WaterChangeSchedule& sched) {
     if (sched.hour > 23 || sched.minute > 59 ||
         sched.pump_out_sec < 10 || sched.pump_in_sec < 10) {
-        LOG_ERROR("CFG", "applyWaterSchedule: invalid");
+        LOG_ERROR("CFG", "applyWaterSchedule: invalid h=%d m=%d out=%d in=%d",
+                  sched.hour, sched.minute, sched.pump_out_sec, sched.pump_in_sec);
         return false;
     }
     _water = sched;
     saveWaterSchedule(sched);
-    LOG_INFO("CFG", "WaterSchedule applied from Firebase");
+
+    // Propagate ngay đến WaterChangeManager
+    // Giữ lại last_run_day/ts hiện tại — không bị overwrite khi update schedule
+    WaterChangeConfig wc = waterChangeManager.getConfig();
+    wc.schedule_enabled = sched.enabled;
+    wc.schedule_hour    = sched.hour;
+    wc.schedule_minute  = sched.minute;
+    wc.pump_out_sec     = sched.pump_out_sec;
+    wc.pump_in_sec      = sched.pump_in_sec;
+    waterChangeManager.setConfig(wc);
+
+    LOG_INFO("CFG", "WaterSchedule applied → waterChangeManager updated"
+             " (schedule=%s %02d:%02d out=%ds in=%ds)",
+             sched.enabled ? "ON" : "OFF",
+             sched.hour, sched.minute,
+             sched.pump_out_sec, sched.pump_in_sec);
     return true;
 }
 

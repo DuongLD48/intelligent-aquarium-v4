@@ -204,19 +204,15 @@ void setup() {
 // LOOP — 18 bước tuần tự
 // ================================================================
 void loop() {
-    // ── BƯỚC 1: Đọc nút bấm ────────────────────────────────────
+    // ── BƯỚC 1: Đọc nút bấm + điều hướng menu ──────────────────
     buttonManager.update();
-
-    // Xử lý nút PAGE → chuyển trang OLED
-    if (buttonManager.wasPressed(BtnId::PAGE)) {
-        oledDisplay.nextPage();
-    }
-
-    // Xử lý nút WATER_CHANGE → kích hoạt thay nước thủ công
-    if (buttonManager.wasPressed(BtnId::WATER_CHANGE)) {
+ 
+    // handleButtons() xử lý UP/DOWN/SELECT/BACK theo màn hình hiện tại
+    // Trả true khi user xác nhận thay nước qua menu
+    if (oledDisplay.handleButtons()) {
         waterChangeManager.triggerManual();
         firebaseClient.notifyButtonTrigger();
-        LOG_INFO("MAIN", "Water change triggered by button");
+        LOG_INFO("MAIN", "Water change triggered via menu (SELECT confirm)");
     }
 
     // ── BƯỚC 2: System update (watchdog + safe mode check) ──────
