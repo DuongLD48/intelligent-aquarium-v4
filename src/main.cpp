@@ -282,10 +282,8 @@ step_firebase:
         gClean,
         gAnalytics,
         safetyCore.currentState(),
-        waterChangeManager.getState(),
-        waterChangeManager.lastRunDay(),
         safetyCore.lastEvent(),
-        systemManager.isSafeMode()   // FIX: was gWifiConnected (bug)
+        systemManager.isSafeMode()
     );
 
     // ── BƯỚC 8: OLED render (throttle 500ms) ────────────────────

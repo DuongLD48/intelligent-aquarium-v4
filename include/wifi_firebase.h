@@ -88,12 +88,11 @@ public:
     void begin();
 
     // Gọi mỗi loop()
+    // Dữ liệu WaterChange đọc trực tiếp từ waterChangeManager singleton bên trong.
     void loop(
         const CleanReading&    clean,
         const AnalyticsResult& analytics,
         const RelayCommand&    relayState,
-        WaterChangeState       wcState,
-        uint32_t               wcLastRun,
         SafetyEvent            lastSafetyEvent,
         bool                   safeMode
     );
@@ -120,11 +119,10 @@ private:
     bool     _ready;
     uint32_t _lastUploadMs;
 
-    // Upload
+    // Upload — WaterChange đọc trực tiếp từ waterChangeManager singleton
     void _uploadAll(
         const CleanReading& c, const AnalyticsResult& a,
-        const RelayCommand& r, WaterChangeState wcState,
-        uint32_t wcLastRun, SafetyEvent lastEvt, bool safeMode);
+        const RelayCommand& r, SafetyEvent lastEvt, bool safeMode);
 
     String _buildTelemetryJson  (const CleanReading&    c);
     String _buildAnalyticsJson  (const AnalyticsResult& a);

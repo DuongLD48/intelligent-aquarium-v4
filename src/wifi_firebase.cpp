@@ -194,8 +194,6 @@ void AquaFirebaseClient::loop(
     const CleanReading&    clean,
     const AnalyticsResult& analytics,
     const RelayCommand&    relayState,
-    WaterChangeState       wcState,
-    uint32_t               wcLastRun,
     SafetyEvent            lastSafetyEvent,
     bool                   safeMode)
 {
@@ -209,7 +207,7 @@ void AquaFirebaseClient::loop(
     if (now - _lastUploadMs >= FIREBASE_UPLOAD_INTERVAL_MS) {
         _lastUploadMs = now;
         _uploadAll(clean, analytics, relayState,
-                   wcState, wcLastRun, lastSafetyEvent, safeMode);
+                   lastSafetyEvent, safeMode);
     }
 
     _checkStreamHealth();
@@ -220,8 +218,7 @@ void AquaFirebaseClient::loop(
 // ================================================================
 void AquaFirebaseClient::_uploadAll(
     const CleanReading& c, const AnalyticsResult& a,
-    const RelayCommand& r, WaterChangeState wcState,
-    uint32_t wcLastRun, SafetyEvent lastEvt, bool safeMode)
+    const RelayCommand& r, SafetyEvent lastEvt, bool safeMode)
 {
     String t  = _buildTelemetryJson(c);
     String an = _buildAnalyticsJson(a);
@@ -237,12 +234,19 @@ void AquaFirebaseClient::_uploadAll(
     Database.set<object_t>(aClient, DB_PATH("status"),
         object_t(st.c_str()), onUploadResult, "upSta");
 
+    // ── Water change: đọc trực tiếp từ singleton ────────────────────
     // QUAN TRỌNG: KHÔNG set() toàn node water_change vì sẽ xoá
-    // manual_trigger (field của Web). Chỉ patch riêng từng field.
-    Database.set<String>(aClient, DB_PATH("water_change/state"),
-        String(_wcStateStr(wcState)), onUploadResult, "upWC_s");
+    // manual_trigger (field của Web). Chỉ set riêng từng field.
+    // Thêm field mới ở đây mà không cần sửa loop() hay main.cpp.
+    Database.set<String>  (aClient, DB_PATH("water_change/state"),
+        String(_wcStateStr(waterChangeManager.getState())),
+        onUploadResult, "upWC_state");
     Database.set<number_t>(aClient, DB_PATH("water_change/last_run"),
-        number_t((double)wcLastRun, 0), onUploadResult, "upWC_r");
+        number_t((double)waterChangeManager.lastRunDay(), 0),
+        onUploadResult, "upWC_day");
+    Database.set<number_t>(aClient, DB_PATH("water_change/last_run_ts"),
+        number_t((double)waterChangeManager.lastRunTs(), 0),
+        onUploadResult, "upWC_ts");
     // trigger_source được ghi riêng bởi _writeTriggerSource()
 }
 
