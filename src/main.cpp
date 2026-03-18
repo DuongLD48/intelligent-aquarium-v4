@@ -107,25 +107,52 @@ static void debugPrintCycle(const CleanReading& c,
                              const RelayCommand& cmd,
                              SafetyEvent evt) {
 
-    const ControlConfig&  ctrl = configManager.getControlConfig();
-    const PipelineConfig& pipe = dataPipeline.getConfig();
-    const SafetyLimits&   lim  = safetyCore.getLimits();
-    const WaterChangeConfig& wc = waterChangeManager.getConfig();
+    const ControlConfig&     ctrl = configManager.getControlConfig();
+    const PipelineConfig&    pipe = dataPipeline.getConfig();
+    const SafetyLimits&      lim  = safetyCore.getLimits();
+    const WaterChangeConfig& wc   = waterChangeManager.getConfig();
+    
+    LOG_DEBUG("START DEBUG", "------------------------------------------------------------");                         
+    // ── NTP time ──────────────────────────────────────────────────
+    time_t now_epoch = time(nullptr);
+    if (now_epoch > 1700000000L) {
+        struct tm ti;
+        localtime_r(&now_epoch, &ti);
+        LOG_DEBUG("MAIN", "NTP  : %04d-%02d-%02d %02d:%02d:%02d UTC+7 | epoch=%ld",
+            ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday,
+            ti.tm_hour, ti.tm_min, ti.tm_sec,
+            (long)now_epoch);
+    } else {
+        LOG_DEBUG("MAIN", "NTP  : NOT SYNCED (epoch=%ld)", (long)now_epoch);
+    }
 
-    // ── Sensors & Relay (giữ nguyên dòng cũ) ──────────────────────
+    // ── WaterChange last run ──────────────────────────────────────
+    uint32_t wc_ts = waterChangeManager.lastRunTs();
+    if (wc_ts > 0) {
+        struct tm wt;
+        localtime_r((const time_t*)&wc_ts, &wt);
+        LOG_DEBUG("MAIN", "WC   : state=%s | lastRun=%04d-%02d-%02d %02d:%02d | ts=%lu",
+            waterChangeManager.getState() == WaterChangeState::IDLE        ? "IDLE" :
+            waterChangeManager.getState() == WaterChangeState::PUMPING_OUT ? "OUT"  :
+            waterChangeManager.getState() == WaterChangeState::PUMPING_IN  ? "IN"   : "DONE",
+            wt.tm_year + 1900, wt.tm_mon + 1, wt.tm_mday,
+            wt.tm_hour, wt.tm_min,
+            (unsigned long)wc_ts);
+    } else {
+        LOG_DEBUG("MAIN", "WC   : state=%s | lastRun=NEVER",
+            waterChangeManager.getState() == WaterChangeState::IDLE ? "IDLE" : "BUSY");
+    }
+
+    // ── Sensors & Relay (giữ nguyên) ─────────────────────────────
     LOG_DEBUG("MAIN",
         "T=%.2f(%c) pH=%.3f(%c) TDS=%.1f(%c) | "
         "H=%d C=%d pHU=%d pHD=%d pIn=%d pOut=%d | "
-        "WSI=%.0f FSI=%.2f | SafeEvt=%d | WC=%s",
+        "WSI=%.0f FSI=%.2f | SafeEvt=%d",
         c.temperature, (c.source_temperature == DataSource::MEASURED ? 'M' : 'F'),
         c.ph,          (c.source_ph          == DataSource::MEASURED ? 'M' : 'F'),
         c.tds,         (c.source_tds         == DataSource::MEASURED ? 'M' : 'F'),
         cmd.heater, cmd.cooler, cmd.ph_up, cmd.ph_down, cmd.pump_in, cmd.pump_out,
-        a.wsi, a.fsi, (int)evt,
-        waterChangeManager.getState() == WaterChangeState::IDLE        ? "IDLE" :
-        waterChangeManager.getState() == WaterChangeState::PUMPING_OUT ? "OUT"  :
-        waterChangeManager.getState() == WaterChangeState::PUMPING_IN  ? "IN"   : "DONE"
-    );
+        a.wsi, a.fsi, (int)evt);
 
     // ── ControlConfig (user settings) ─────────────────────────────
     LOG_DEBUG("CFG",
@@ -173,6 +200,7 @@ static void debugPrintCycle(const CleanReading& c,
         (int)wc.schedule_hour, (int)wc.schedule_minute,
         (int)wc.pump_out_sec,  (int)wc.pump_in_sec
     );
+    LOG_DEBUG("END DEBUG", "------------------------------------------------------------");
 }
 
 // ================================================================
@@ -334,6 +362,5 @@ step_firebase:
 
     // ── BƯỚC 18: Debug print ─────────────────────────────────────
     debugPrintCycle(clean, gAnalytics, cmd, evt);
-    LOG_INFO("MAIN", "========================================\n");
     
 }
