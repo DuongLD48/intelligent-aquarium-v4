@@ -235,8 +235,14 @@ bool ConfigManager::loadWaterSchedule(WaterChangeSchedule& out) {
     out.minute       = prefs.getUChar("minute",    out.minute);
     out.pump_out_sec = prefs.getUShort("pout_sec", out.pump_out_sec);
     out.pump_in_sec  = prefs.getUShort("pin_sec",  out.pump_in_sec);
-    out.last_run_day = prefs.getULong("last_day",  out.last_run_day);
+    out.last_run_day = prefs.getULong("last_day", out.last_run_day);
+    out.last_run_ts  = prefs.getULong("last_ts",  out.last_run_ts);
     prefs.end();
+    LOG_INFO("CFG", "WaterSchedule loaded: enabled=%d %02d:%02d out=%ds in=%ds last_day=%lu last_ts=%lu",
+             out.enabled, out.hour, out.minute,
+             out.pump_out_sec, out.pump_in_sec,
+             (unsigned long)out.last_run_day,
+             (unsigned long)out.last_run_ts);
     return true;
 }
 
@@ -256,13 +262,16 @@ bool ConfigManager::saveWaterSchedule(const WaterChangeSchedule& sched) {
     prefs.putUChar("minute",    sched.minute);
     prefs.putUShort("pout_sec", sched.pump_out_sec);
     prefs.putUShort("pin_sec",  sched.pump_in_sec);
-    prefs.putULong("last_day",  sched.last_run_day);
+    prefs.putULong("last_day", sched.last_run_day);
+    prefs.putULong("last_ts",  sched.last_run_ts);
     prefs.putBool("saved",      true);
     prefs.end();
 
-    LOG_INFO("CFG", "WaterSchedule saved: enabled=%d %02d:%02d out=%ds in=%ds",
+    LOG_INFO("CFG", "WaterSchedule saved: enabled=%d %02d:%02d out=%ds in=%ds last_day=%lu last_ts=%lu",
              sched.enabled, sched.hour, sched.minute,
-             sched.pump_out_sec, sched.pump_in_sec);
+             sched.pump_out_sec, sched.pump_in_sec,
+             (unsigned long)sched.last_run_day,
+             (unsigned long)sched.last_run_ts);
     return true;
 }
 

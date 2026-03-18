@@ -186,29 +186,27 @@ void WaterChangeManager::_tick() {
 //   3. Chưa chạy hôm nay (_lastRunDay != hôm nay)
 // ================================================================
 bool WaterChangeManager::_isScheduleTime() const {
-    // Lấy thời gian hệ thống từ NTP (đã set qua configTime trong system_manager)
     time_t now_epoch = time(nullptr);
-    if (now_epoch < 1700000000L) {
-        // Thời gian chưa sync (epoch quá nhỏ = chưa có NTP)
+    if (now_epoch < 1700000000L) return false;  // NTP chưa sync
+
+    // Áp dụng offset UTC+7 thủ công vào epoch trước khi dùng gmtime_r.
+    // KHÔNG dùng localtime_r() vì configTime() trên ESP32-Arduino không
+    // đảm bảo timezone được set đúng cho localtime() — có thể trả UTC thuần.
+    time_t local_epoch = now_epoch + NTP_GMT_OFFSET_SEC;
+    struct tm t;
+    gmtime_r(&local_epoch, &t);
+
+    // Khớp giờ:phút — window = toàn bộ phút đó (0–59 giây)
+    if ((uint8_t)t.tm_hour != _cfg.schedule_hour ||
+        (uint8_t)t.tm_min  != _cfg.schedule_minute) {
         return false;
     }
 
-    // Chuyển về local time UTC+7
-    struct tm timeinfo;
-    localtime_r(&now_epoch, &timeinfo);
+    // Chưa chạy hôm nay
+    if (_lastRunDay == _todayDay()) return false;
 
-    // Kiểm tra giờ:phút
-    if ((uint8_t)timeinfo.tm_hour   != _cfg.schedule_hour ||
-        (uint8_t)timeinfo.tm_min    != _cfg.schedule_minute) {
-        return false;
-    }
-
-    // Kiểm tra chưa chạy hôm nay
-    uint32_t today = _todayDay();
-    if (_lastRunDay == today) {
-        return false;
-    }
-
+    LOG_INFO("WATER", "_isScheduleTime: MATCH %02d:%02d (epoch=%lu)",
+             (int)t.tm_hour, (int)t.tm_min, (unsigned long)now_epoch);
     return true;
 }
 
@@ -218,8 +216,12 @@ bool WaterChangeManager::_isScheduleTime() const {
 uint32_t WaterChangeManager::_todayDay() const {
     time_t now_epoch = time(nullptr);
     if (now_epoch < 1700000000L) return 0;
-    // Cộng UTC+7 offset trước khi chia ngày
-    return (uint32_t)((now_epoch + NTP_GMT_OFFSET_SEC) / 86400L);
+    // Áp dụng offset UTC+7 thủ công, nhất quán với _isScheduleTime()
+    time_t local_epoch = now_epoch + NTP_GMT_OFFSET_SEC;
+    struct tm t;
+    gmtime_r(&local_epoch, &t);
+    // Set về đầu ngày local rồi chia 86400 để ra số ngày tuyệt đối
+    return (uint32_t)((local_epoch - t.tm_sec - t.tm_min * 60 - t.tm_hour * 3600) / 86400L);
 }
 
 // ================================================================
