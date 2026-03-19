@@ -6,6 +6,7 @@
 // (xem FirebaseClient.h line 25: #if defined(ENABLE_DATABASE))
 // ================================================================
 #define ENABLE_DATABASE
+#define ENABLE_FIRESTORE
 #define ENABLE_LEGACY_TOKEN
 
 #include "type_definitions.h"

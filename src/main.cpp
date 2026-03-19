@@ -21,6 +21,7 @@
 #include "button_manager.h"
 #include "wifi_firebase.h"
 #include "system_manager.h"
+#include "firestore_history.h"
 
 // ================================================================
 // main.cpp
@@ -200,6 +201,44 @@ static void debugPrintCycle(const CleanReading& c,
         (int)wc.schedule_hour, (int)wc.schedule_minute,
         (int)wc.pump_out_sec,  (int)wc.pump_in_sec
     );
+    // ── FirestoreHistory status ────────────────────────────────────
+    {
+        uint32_t secLeft = firestoreHistory.secondsUntilFlush();
+        uint32_t bktMs   = firestoreHistory.getCurrentBucketMs();
+        uint32_t lastTs  = firestoreHistory.getLastFlushTs();
+
+        int bktH = (int)((bktMs / 3600000UL) % 24);
+        int bktM = (int)((bktMs / 60000UL)   % 60);
+
+        if (lastTs > 0) {
+            struct tm lt;
+            localtime_r((const time_t*)&lastTs, &lt);
+            LOG_DEBUG("FSH",
+                "ready=%s | samples=[T:%d pH:%d TDS:%d] | "
+                "bucket=%02d:%02d | flush_in=%lus | "
+                "flushCount=%lu | lastFlush=%02d:%02d:%02d",
+                firestoreHistory.isReady() ? "YES" : "NO",
+                (int)firestoreHistory.getTempCount(),
+                (int)firestoreHistory.getPhCount(),
+                (int)firestoreHistory.getTdsCount(),
+                bktH, bktM,
+                (unsigned long)secLeft,
+                (unsigned long)firestoreHistory.getFlushCount(),
+                lt.tm_hour, lt.tm_min, lt.tm_sec);
+        } else {
+            LOG_DEBUG("FSH",
+                "ready=%s | samples=[T:%d pH:%d TDS:%d] | "
+                "bucket=%02d:%02d | flush_in=%lus | "
+                "flushCount=%lu | lastFlush=NEVER",
+                firestoreHistory.isReady() ? "YES" : "NO",
+                (int)firestoreHistory.getTempCount(),
+                (int)firestoreHistory.getPhCount(),
+                (int)firestoreHistory.getTdsCount(),
+                bktH, bktM,
+                (unsigned long)secLeft,
+                (unsigned long)firestoreHistory.getFlushCount());
+        }
+    }
     LOG_DEBUG("END DEBUG", "------------------------------------------------------------");
 }
 

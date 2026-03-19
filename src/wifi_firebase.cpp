@@ -1,13 +1,17 @@
 // ================================================================
-// wifi_firebase.cpp — Intelligent Aquarium v4.0
+// wifi_firebase.cpp — Intelligent Aquarium v4.1
 //
 // Thư viện: mobizt/FirebaseClient v2.x
 //
+// Thay đổi so với v4.0:
+//   + Tích hợp FirestoreHistory (firestoreHistory.h/.cpp)
+//   + begin(): gọi firestoreHistory.begin(app)
+//   + loop():  gọi firestoreHistory.loop() + firestoreHistory.ingest()
+//
 // ── ĐIỂM QUAN TRỌNG TỪ SOURCE THỰC TẾ ──────────────────────────
 //
-// 1. ENABLE_DATABASE phải được define TRƯỚC khi include
+// 1. ENABLE_DATABASE + ENABLE_FIRESTORE phải define TRƯỚC include
 //    FirebaseClient.h (đã define trong wifi_firebase.h)
-//    → Nếu không, RealtimeDatabase.h sẽ không được include
 //
 // 2. AsyncClientClass v2.1+ là network-independent
 //    → Constructor chỉ cần WiFiClientSecure, không cần DefaultNetwork
@@ -34,7 +38,8 @@
 //    rồi RTDB.event(), RTDB.dataPath(), RTDB.to<T>()
 // ================================================================
 
-#include "wifi_firebase.h"     // Đã có #define ENABLE_DATABASE
+#include "wifi_firebase.h"        // ENABLE_DATABASE + ENABLE_FIRESTORE
+#include "firestore_history.h"    // ← MỚI: Firestore history module
 #include "credentials.h"
 #include "logger.h"
 #include "config_manager.h"
@@ -46,15 +51,14 @@
 
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
-#include <FirebaseClient.h>    // Include SAU wifi_firebase.h để ENABLE_DATABASE có hiệu lực
+#include <FirebaseClient.h>    // Include SAU wifi_firebase.h
 
 #include <time.h>
 #include <string.h>
 #include <stdio.h>
 
 // ----------------------------------------------------------------
-// Forward extern — các global singleton khai báo trong main.cpp
-// nhưng không có extern trong header tương ứng
+// Forward extern
 // ----------------------------------------------------------------
 extern DataPipeline dataPipeline;
 
@@ -81,21 +85,23 @@ AquaFirebaseClient  firebaseClient;
 // ================================================================
 
 // SSL clients — mỗi connection cần 1 instance riêng
-static WiFiClientSecure ssl_upload;    // cho set/patch
+static WiFiClientSecure ssl_upload;    // cho set/patch RTDB
 static WiFiClientSecure ssl_stream1;   // cho stream /settings
 static WiFiClientSecure ssl_stream2;   // cho stream /manual_trigger
 
 // AsyncClient v2.1+: constructor chỉ cần ssl client
-// (network-independent — không cần DefaultNetwork)
 static AsyncClient aClient      (ssl_upload);
 static AsyncClient aClientStream1(ssl_stream1);
 static AsyncClient aClientStream2(ssl_stream2);
 
+// ── Shared client cho Firestore — tái dụng ssl_upload ────────────
+// Firestore dùng chung ssl_upload và aClient với RTDB upload
+// để tiết kiệm RAM (tránh tạo SSL context thứ 4)
+AsyncClientClass& getSharedFstoreClient() { return aClient; }
+
 // Auth: LegacyToken (Database Secret)
-// Lấy tại: Firebase Console → Project Settings → Service accounts → Database secrets
-// Điền vào credentials.h: #define FIREBASE_TOKEN "your-database-secret"
-static LegacyToken legacy_auth(FIREBASE_TOKEN);
-static FirebaseApp app;
+static LegacyToken  legacy_auth(FIREBASE_TOKEN);
+static FirebaseApp  app;
 static RealtimeDatabase Database;
 
 // Con trỏ tới instance để callback tự do có thể gọi lại methods
@@ -167,7 +173,6 @@ void AquaFirebaseClient::begin() {
     ssl_stream2.setInsecure();
 
     // initializeApp với LegacyToken + callback
-    // Signature: initializeApp(aClient, app, getAuth(auth), cb, uid)
     initializeApp(aClient, app, getAuth(legacy_auth), onUploadResult, "authTask");
 
     // Bind RealtimeDatabase với app, set URL
@@ -177,6 +182,11 @@ void AquaFirebaseClient::begin() {
     // Bắt đầu 2 stream
     _startSettingsStream();
     _startTriggerStream();
+
+    // ── MỚI: Khởi tạo Firestore history ─────────────────────────
+    // Phải gọi SAU initializeApp() vì firestoreHistory.begin() cần
+    // app đã được init để bind Firestore::Documents
+    firestoreHistory.begin(&app);
 
     _ready = true;
     uint32_t now = millis();
@@ -203,11 +213,19 @@ void AquaFirebaseClient::loop(
     app.loop();
     Database.loop();
 
+    // ── MỚI: Firestore async queue ───────────────────────────────
+    firestoreHistory.loop();
+
     uint32_t now = millis();
     if (now - _lastUploadMs >= FIREBASE_UPLOAD_INTERVAL_MS) {
         _lastUploadMs = now;
         _uploadAll(clean, analytics, relayState,
                    lastSafetyEvent, safeMode);
+
+        // ── MỚI: Tích lũy mẫu vào Firestore history buffer ──────
+        // Dùng giá trị clean trực tiếp — fallback đã qua pipeline,
+        // vẫn là giá trị hợp lệ nhất có thể. ingest() tự lọc NaN.
+        firestoreHistory.ingest(clean.temperature, clean.ph, clean.tds);
     }
 
     _checkStreamHealth();
@@ -224,7 +242,7 @@ void AquaFirebaseClient::_uploadAll(
     String an = _buildAnalyticsJson(a);
     String rl = _buildRelayJson(r);
     String st = _buildStatusJson(lastEvt, safeMode);
-    // Signature: set(aClient, path, value, cb, uid, etag)
+
     Database.set<object_t>(aClient, DB_PATH("telemetry"),
         object_t(t.c_str()),  onUploadResult, "upTel");
     Database.set<object_t>(aClient, DB_PATH("analytics"),
@@ -234,10 +252,8 @@ void AquaFirebaseClient::_uploadAll(
     Database.set<object_t>(aClient, DB_PATH("status"),
         object_t(st.c_str()), onUploadResult, "upSta");
 
-    // ── Water change: đọc trực tiếp từ singleton ────────────────────
-    // QUAN TRỌNG: KHÔNG set() toàn node water_change vì sẽ xoá
-    // manual_trigger (field của Web). Chỉ set riêng từng field.
-    // Thêm field mới ở đây mà không cần sửa loop() hay main.cpp.
+    // Water change: chỉ set từng field, không set toàn node
+    // (tránh xoá manual_trigger của Web)
     Database.set<String>  (aClient, DB_PATH("water_change/state"),
         String(_wcStateStr(waterChangeManager.getState())),
         onUploadResult, "upWC_state");
@@ -352,7 +368,6 @@ void AquaFirebaseClient::_writeTriggerSource(const char* src) {
 // STREAM 1 — /settings (SSE)
 // ================================================================
 void AquaFirebaseClient::_startSettingsStream() {
-    // Signature: get(aClient, path, cb, sse, uid)
     Database.get(aClientStream1,
         DB_PATH("settings"),
         onStream1Result,
@@ -394,21 +409,14 @@ void AquaFirebaseClient::_checkStreamHealth() {
 // ================================================================
 // PARSE /settings PAYLOAD
 //
-// FirebaseClient v2 SSE stream:
-//   RTDB.dataPath() = path tương đối so với node /settings
-//   r.c_str()       = raw JSON value tại path đó (trên AsyncResult)
-//
 // 3 cases:
-//   path == "/"              → full dump: {"config":{...},"pipeline_config":{...},...}
-//   path == "/config"        → group object: {"temp_min":25,...}
-//   path == "/config/temp_min" → single field: 25
+//   path == "/"                → full dump
+//   path == "/config"          → group-level object
+//   path == "/config/temp_min" → single field
 // ================================================================
 void AquaFirebaseClient::_onSettingsPayload(const char* path, const char* data) {
     if (!path || !data || !*data) return;
 
-    // ----------------------------------------------------------------
-    // applyGroup: apply đúng group theo tên
-    // ----------------------------------------------------------------
     auto applyGroup = [](const char* groupName, const char* groupJson) {
         if (strcmp(groupName, "config") == 0) {
             ControlConfig cc = configManager.getControlConfig();
@@ -484,9 +492,7 @@ void AquaFirebaseClient::_onSettingsPayload(const char* path, const char* data) 
         }
     };
 
-    // ----------------------------------------------------------------
-    // Case 1: path == "/" → full /settings dump, xử lý tất cả groups
-    // ----------------------------------------------------------------
+    // Case 1: path == "/" → full /settings dump
     if (strcmp(path, "/") == 0 || strcmp(path, "") == 0) {
         LOG_INFO("FB", "Stream1: full settings dump");
         auto findSub = [](const char* s, const char* key) -> const char* {
@@ -510,19 +516,14 @@ void AquaFirebaseClient::_onSettingsPayload(const char* path, const char* data) 
     // Bỏ '/' đầu
     const char* groupName = (path[0] == '/') ? path + 1 : path;
 
-    // ----------------------------------------------------------------
-    // Case 2: path == "/config" → group-level, data là object đầy đủ
-    // ----------------------------------------------------------------
+    // Case 2: path == "/config" → group-level object
     const char* slash = strchr(groupName, '/');
     if (!slash) {
         applyGroup(groupName, data);
         return;
     }
 
-    // ----------------------------------------------------------------
-    // Case 3: path == "/config/temp_min" → single field update
-    // Wrap thành {"fieldName": value} để parser dùng được
-    // ----------------------------------------------------------------
+    // Case 3: path == "/config/temp_min" → single field
     char group[32] = {};
     size_t gLen = (size_t)(slash - groupName);
     if (gLen >= sizeof(group)) return;
@@ -561,8 +562,6 @@ void AquaFirebaseClient::_onTriggerPayload(bool triggered) {
 // ================================================================
 // ================================================================
 // FREE FUNCTION CALLBACKS
-// Bắt buộc là free function — không phải lambda hay static method
-// để đảm bảo tương thích với AsyncResultCallback type
 // ================================================================
 // ================================================================
 
@@ -589,11 +588,6 @@ static void onStream1Result(AsyncResult& r) {
     RealtimeDatabaseResult& RTDB = r.to<RealtimeDatabaseResult>();
     if (RTDB.event() != "put" && RTDB.event() != "patch") return;
 
-    // dataPath() = path tương đối so với node /settings, ví dụ:
-    //   "/"                → initial full dump khi connect/reconnect
-    //   "/config"          → sub-object config thay đổi
-    //   "/config/temp_min" → 1 field thay đổi
-    // r.c_str() = raw JSON value tại dataPath (trên AsyncResult, không phải RTDB)
     const String& dataPath = RTDB.dataPath();
     const char*   dataStr  = r.c_str();
     if (!dataStr) return;
@@ -612,11 +606,9 @@ static void onStream2Result(AsyncResult& r) {
     }
     if (!r.available()) return;
 
-    // Cập nhật health timer
     _fbClient->_lastTriggerStreamMs = millis();
 
     RealtimeDatabaseResult& RTDB = r.to<RealtimeDatabaseResult>();
-
     if (RTDB.event() == "put" || RTDB.event() == "patch") {
         _fbClient->_onTriggerPayload(RTDB.to<bool>());
     }
