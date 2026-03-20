@@ -6,7 +6,6 @@
 // (xem FirebaseClient.h line 25: #if defined(ENABLE_DATABASE))
 // ================================================================
 #define ENABLE_DATABASE
-#define ENABLE_FIRESTORE
 #define ENABLE_LEGACY_TOKEN
 
 #include "type_definitions.h"
@@ -27,13 +26,15 @@
 //
 // ── SCHEMA ──────────────────────────────────────────────────────
 //  /devices/{DEVICE_ID}/
-//    telemetry/    ← ESP32 ghi 5s
-//    analytics/    ← ESP32 ghi 5s
-//    relay_state/  ← ESP32 ghi 5s
-//    status/       ← ESP32 ghi 5s (safe_mode, last_safety_event)
-//    water_change/ ← ESP32 ghi state/last_run/trigger_source
-//                    Web ghi manual_trigger=true
-//    settings/     ← Web ghi, ESP32 stream (1 stream)
+//    telemetry/         ← ESP32 ghi 5s
+//    analytics/         ← ESP32 ghi 5s
+//    relay_state/       ← ESP32 ghi 5s
+//    status/            ← ESP32 ghi 5s (safe_mode, last_safety_event)
+//    water_change/      ← ESP32 ghi state/last_run/trigger_source
+//                         Web ghi manual_trigger=true
+//    settings/          ← Web ghi, ESP32 stream (1 stream)
+//    history/{ts}       ← ESP32 ghi 60s {temp, ph, tds}
+//                         ts = Unix timestamp (giây) — sort tự nhiên
 //
 // ── 2 STREAMS ───────────────────────────────────────────────────
 //  Stream1: /settings        → parse 5 config groups
@@ -51,6 +52,7 @@
 // ----------------------------------------------------------------
 #define WIFI_RECONNECT_INTERVAL_MS    5000UL
 #define FIREBASE_UPLOAD_INTERVAL_MS   5000UL
+#define FIREBASE_HISTORY_INTERVAL_MS 60000UL  // ghi history mỗi 60s vào RTDB
 #define FIREBASE_STREAM_RETRY_MS     60000UL  // stream tự reconnect, chỉ restart nếu stale >60s
 
 // ----------------------------------------------------------------
@@ -119,11 +121,15 @@ public:
 private:
     bool     _ready;
     uint32_t _lastUploadMs;
+    uint32_t _lastHistoryMs;   // timestamp lần ghi history gần nhất
 
     // Upload — WaterChange đọc trực tiếp từ waterChangeManager singleton
     void _uploadAll(
         const CleanReading& c, const AnalyticsResult& a,
         const RelayCommand& r, SafetyEvent lastEvt, bool safeMode);
+
+    // Ghi history 60s một lần vào RTDB /history/{unix_ts}
+    void _uploadHistory(const CleanReading& c);
 
     String _buildTelemetryJson  (const CleanReading&    c);
     String _buildAnalyticsJson  (const AnalyticsResult& a);

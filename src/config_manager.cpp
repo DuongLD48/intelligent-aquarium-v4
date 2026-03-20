@@ -235,43 +235,67 @@ bool ConfigManager::loadWaterSchedule(WaterChangeSchedule& out) {
     out.minute       = prefs.getUChar("minute",    out.minute);
     out.pump_out_sec = prefs.getUShort("pout_sec", out.pump_out_sec);
     out.pump_in_sec  = prefs.getUShort("pin_sec",  out.pump_in_sec);
-    out.last_run_day = prefs.getULong("last_day", out.last_run_day);
-    out.last_run_ts  = prefs.getULong("last_ts",  out.last_run_ts);
+    out.last_run_day = prefs.getULong("last_day",  out.last_run_day);
+    out.last_run_ts  = prefs.getULong("last_ts",   out.last_run_ts);
+    // Runtime limits — Admin config qua Firebase
+    out.pump_min_sec     = prefs.getUShort("p_min",    out.pump_min_sec);
+    out.pump_out_max_sec = prefs.getUShort("pout_max", out.pump_out_max_sec);
+    out.pump_in_max_sec  = prefs.getUShort("pin_max",  out.pump_in_max_sec);
     prefs.end();
-    LOG_INFO("CFG", "WaterSchedule loaded: enabled=%d %02d:%02d out=%ds in=%ds last_day=%lu last_ts=%lu",
+    LOG_INFO("CFG", "WaterSchedule loaded: enabled=%d %02d:%02d out=%ds in=%ds limits=[%d..%d/%d] last_day=%lu last_ts=%lu",
              out.enabled, out.hour, out.minute,
              out.pump_out_sec, out.pump_in_sec,
+             out.pump_min_sec, out.pump_out_max_sec, out.pump_in_max_sec,
              (unsigned long)out.last_run_day,
              (unsigned long)out.last_run_ts);
     return true;
 }
 
 bool ConfigManager::saveWaterSchedule(const WaterChangeSchedule& sched) {
+    // Validate limits bằng compile-time constants làm hard ceiling tuyệt đối
+    if (sched.pump_min_sec     < WATER_CHANGE_MIN_PUMP_SEC   ||
+        sched.pump_out_max_sec > WATER_CHANGE_MAX_PUMP_OUT_SEC ||
+        sched.pump_in_max_sec  > WATER_CHANGE_MAX_PUMP_IN_SEC  ||
+        sched.pump_min_sec     >= sched.pump_out_max_sec       ||
+        sched.pump_min_sec     >= sched.pump_in_max_sec) {
+        LOG_ERROR("CFG", "saveWaterSchedule: invalid limits min=%d out_max=%d in_max=%d",
+                  sched.pump_min_sec, sched.pump_out_max_sec, sched.pump_in_max_sec);
+        return false;
+    }
+    // Validate pump time theo runtime limits
     if (sched.hour > 23 || sched.minute > 59 ||
-        sched.pump_out_sec < 10 || sched.pump_in_sec < 10) {
-        LOG_ERROR("CFG", "saveWaterSchedule: invalid values h=%d m=%d out=%d in=%d",
-                  sched.hour, sched.minute, sched.pump_out_sec, sched.pump_in_sec);
+        sched.pump_out_sec < sched.pump_min_sec ||
+        sched.pump_in_sec  < sched.pump_min_sec ||
+        sched.pump_out_sec > sched.pump_out_max_sec ||
+        sched.pump_in_sec  > sched.pump_in_max_sec) {
+        LOG_ERROR("CFG", "saveWaterSchedule: invalid values h=%d m=%d out=%d(min=%d,max=%d) in=%d(min=%d,max=%d)",
+                  sched.hour, sched.minute,
+                  sched.pump_out_sec, sched.pump_min_sec, sched.pump_out_max_sec,
+                  sched.pump_in_sec,  sched.pump_min_sec, sched.pump_in_max_sec);
         return false;
     }
 
     Preferences prefs;
     if (!prefs.begin(NVS_NAMESPACE_WATER, false)) return false;
 
-    prefs.putBool("enabled",    sched.enabled);
-    prefs.putUChar("hour",      sched.hour);
-    prefs.putUChar("minute",    sched.minute);
-    prefs.putUShort("pout_sec", sched.pump_out_sec);
-    prefs.putUShort("pin_sec",  sched.pump_in_sec);
-    prefs.putULong("last_day", sched.last_run_day);
-    prefs.putULong("last_ts",  sched.last_run_ts);
-    prefs.putBool("saved",      true);
+    prefs.putBool("enabled",     sched.enabled);
+    prefs.putUChar("hour",       sched.hour);
+    prefs.putUChar("minute",     sched.minute);
+    prefs.putUShort("pout_sec",  sched.pump_out_sec);
+    prefs.putUShort("pin_sec",   sched.pump_in_sec);
+    prefs.putULong("last_day",   sched.last_run_day);
+    prefs.putULong("last_ts",    sched.last_run_ts);
+    // Runtime limits
+    prefs.putUShort("p_min",     sched.pump_min_sec);
+    prefs.putUShort("pout_max",  sched.pump_out_max_sec);
+    prefs.putUShort("pin_max",   sched.pump_in_max_sec);
+    prefs.putBool("saved",       true);
     prefs.end();
 
-    LOG_INFO("CFG", "WaterSchedule saved: enabled=%d %02d:%02d out=%ds in=%ds last_day=%lu last_ts=%lu",
+    LOG_INFO("CFG", "WaterSchedule saved: enabled=%d %02d:%02d out=%ds in=%ds limits=[%d..%d/%d]",
              sched.enabled, sched.hour, sched.minute,
              sched.pump_out_sec, sched.pump_in_sec,
-             (unsigned long)sched.last_run_day,
-             (unsigned long)sched.last_run_ts);
+             sched.pump_min_sec, sched.pump_out_max_sec, sched.pump_in_max_sec);
     return true;
 }
 
@@ -342,8 +366,25 @@ bool ConfigManager::parseWaterScheduleJson(const char* json, WaterChangeSchedule
     if (_parseBool(json, "enabled", bVal))   tmp.enabled = bVal;
     if (_parseInt(json, "hour",     iVal) && iVal >= 0 && iVal <= 23)  tmp.hour   = (uint8_t)iVal;
     if (_parseInt(json, "minute",   iVal) && iVal >= 0 && iVal <= 59)  tmp.minute = (uint8_t)iVal;
-    if (_parseInt(json, "pump_out_sec", iVal) && iVal >= 10) tmp.pump_out_sec = (uint16_t)iVal;
-    if (_parseInt(json, "pump_in_sec",  iVal) && iVal >= 10) tmp.pump_in_sec  = (uint16_t)iVal;
+
+    // Parse runtime limits trước để dùng validate pump time ngay bên dưới
+    if (_parseInt(json, "pump_min_sec",     iVal) &&
+        iVal >= WATER_CHANGE_MIN_PUMP_SEC && iVal < WATER_CHANGE_MAX_PUMP_OUT_SEC)
+        tmp.pump_min_sec = (uint16_t)iVal;
+    if (_parseInt(json, "pump_out_max_sec", iVal) &&
+        iVal >  tmp.pump_min_sec           && iVal <= WATER_CHANGE_MAX_PUMP_OUT_SEC)
+        tmp.pump_out_max_sec = (uint16_t)iVal;
+    if (_parseInt(json, "pump_in_max_sec",  iVal) &&
+        iVal >  tmp.pump_min_sec           && iVal <= WATER_CHANGE_MAX_PUMP_IN_SEC)
+        tmp.pump_in_max_sec = (uint16_t)iVal;
+
+    // Parse pump time — bound theo runtime limits (đã được update ở trên)
+    if (_parseInt(json, "pump_out_sec", iVal) &&
+        iVal >= tmp.pump_min_sec && iVal <= tmp.pump_out_max_sec)
+        tmp.pump_out_sec = (uint16_t)iVal;
+    if (_parseInt(json, "pump_in_sec",  iVal) &&
+        iVal >= tmp.pump_min_sec && iVal <= tmp.pump_in_max_sec)
+        tmp.pump_in_sec = (uint16_t)iVal;
 
     out = tmp;
     return true;
@@ -394,10 +435,26 @@ bool ConfigManager::applyPipelineConfig(const PipelineConfig& cfg) {
 }
 
 bool ConfigManager::applyWaterSchedule(const WaterChangeSchedule& sched) {
+    // Validate limits — compile-time constants là hard ceiling tuyệt đối
+    if (sched.pump_min_sec     < WATER_CHANGE_MIN_PUMP_SEC     ||
+        sched.pump_out_max_sec > WATER_CHANGE_MAX_PUMP_OUT_SEC ||
+        sched.pump_in_max_sec  > WATER_CHANGE_MAX_PUMP_IN_SEC  ||
+        sched.pump_min_sec     >= sched.pump_out_max_sec        ||
+        sched.pump_min_sec     >= sched.pump_in_max_sec) {
+        LOG_ERROR("CFG", "applyWaterSchedule: invalid limits min=%d out_max=%d in_max=%d",
+                  sched.pump_min_sec, sched.pump_out_max_sec, sched.pump_in_max_sec);
+        return false;
+    }
+    // Validate pump time theo runtime limits
     if (sched.hour > 23 || sched.minute > 59 ||
-        sched.pump_out_sec < 10 || sched.pump_in_sec < 10) {
-        LOG_ERROR("CFG", "applyWaterSchedule: invalid h=%d m=%d out=%d in=%d",
-                  sched.hour, sched.minute, sched.pump_out_sec, sched.pump_in_sec);
+        sched.pump_out_sec < sched.pump_min_sec ||
+        sched.pump_in_sec  < sched.pump_min_sec ||
+        sched.pump_out_sec > sched.pump_out_max_sec ||
+        sched.pump_in_sec  > sched.pump_in_max_sec) {
+        LOG_ERROR("CFG", "applyWaterSchedule: invalid h=%d m=%d out=%d[%d..%d] in=%d[%d..%d]",
+                  sched.hour, sched.minute,
+                  sched.pump_out_sec, sched.pump_min_sec, sched.pump_out_max_sec,
+                  sched.pump_in_sec,  sched.pump_min_sec, sched.pump_in_max_sec);
         return false;
     }
     _water = sched;

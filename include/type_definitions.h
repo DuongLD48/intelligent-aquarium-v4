@@ -123,4 +123,10 @@ struct WaterChangeSchedule {
     uint16_t pump_in_sec   = 60;     // Thời gian bơm vào (giây)
     uint32_t last_run_day  = 0;      // epoch/86400 — tránh chạy 2 lần/ngày
     uint32_t last_run_ts   = 0;      // Unix timestamp (UTC) lúc hoàn thành — web dùng để hiển thị ngày giờ phút
+
+    // Giới hạn runtime — Admin config qua Firebase (thay vì hard-code macro)
+    // Default lấy từ WATER_CHANGE_MIN/MAX constants khi load lần đầu
+    uint16_t pump_min_sec     = 10;   // Tối thiểu bơm (giây) — áp dụng cho cả out và in
+    uint16_t pump_out_max_sec = 300;  // Tối đa bơm ra (giây)
+    uint16_t pump_in_max_sec  = 600;  // Tối đa bơm vào (giây)
 };

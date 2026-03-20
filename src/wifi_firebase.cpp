@@ -1,17 +1,17 @@
 // ================================================================
-// wifi_firebase.cpp — Intelligent Aquarium v4.1
+// wifi_firebase.cpp — Intelligent Aquarium v4.2
 //
 // Thư viện: mobizt/FirebaseClient v2.x
 //
-// Thay đổi so với v4.0:
-//   + Tích hợp FirestoreHistory (firestoreHistory.h/.cpp)
-//   + begin(): gọi firestoreHistory.begin(app)
-//   + loop():  gọi firestoreHistory.loop() + firestoreHistory.ingest()
+// Thay đổi so với v4.1:
+//   - Bỏ FirestoreHistory (RAM + delay)
+//   + History ghi thẳng vào RTDB /history/{unix_ts} mỗi 60s
+//     dùng chung aClient — không tốn SSL context thêm
 //
 // ── ĐIỂM QUAN TRỌNG TỪ SOURCE THỰC TẾ ──────────────────────────
 //
-// 1. ENABLE_DATABASE + ENABLE_FIRESTORE phải define TRƯỚC include
-//    FirebaseClient.h (đã define trong wifi_firebase.h)
+// 1. ENABLE_DATABASE phải define TRƯỚC include FirebaseClient.h
+//    (đã define trong wifi_firebase.h)
 //
 // 2. AsyncClientClass v2.1+ là network-independent
 //    → Constructor chỉ cần WiFiClientSecure, không cần DefaultNetwork
@@ -38,8 +38,7 @@
 //    rồi RTDB.event(), RTDB.dataPath(), RTDB.to<T>()
 // ================================================================
 
-#include "wifi_firebase.h"        // ENABLE_DATABASE + ENABLE_FIRESTORE
-#include "firestore_history.h"    // ← MỚI: Firestore history module
+#include "wifi_firebase.h"
 #include "credentials.h"
 #include "logger.h"
 #include "config_manager.h"
@@ -93,11 +92,6 @@ static WiFiClientSecure ssl_stream2;   // cho stream /manual_trigger
 static AsyncClient aClient      (ssl_upload);
 static AsyncClient aClientStream1(ssl_stream1);
 static AsyncClient aClientStream2(ssl_stream2);
-
-// ── Shared client cho Firestore — tái dụng ssl_upload ────────────
-// Firestore dùng chung ssl_upload và aClient với RTDB upload
-// để tiết kiệm RAM (tránh tạo SSL context thứ 4)
-AsyncClientClass& getSharedFstoreClient() { return aClient; }
 
 // Auth: LegacyToken (Database Secret)
 static LegacyToken  legacy_auth(FIREBASE_TOKEN);
@@ -155,7 +149,7 @@ void WiFiManager::_connect()          { WiFi.begin(_ssid, _password); }
 // ================================================================
 
 AquaFirebaseClient::AquaFirebaseClient()
-    : _ready(false), _lastUploadMs(0),
+    : _ready(false), _lastUploadMs(0), _lastHistoryMs(0),
       _lastSettingsStreamMs(0), _lastTriggerStreamMs(0) {}
 
 // ================================================================
@@ -183,14 +177,10 @@ void AquaFirebaseClient::begin() {
     _startSettingsStream();
     _startTriggerStream();
 
-    // ── MỚI: Khởi tạo Firestore history ─────────────────────────
-    // Phải gọi SAU initializeApp() vì firestoreHistory.begin() cần
-    // app đã được init để bind Firestore::Documents
-    firestoreHistory.begin(&app);
-
     _ready = true;
     uint32_t now = millis();
     _lastUploadMs         = 0;
+    _lastHistoryMs        = 0;
     _lastSettingsStreamMs = now;
     _lastTriggerStreamMs  = now;
 
@@ -213,19 +203,18 @@ void AquaFirebaseClient::loop(
     app.loop();
     Database.loop();
 
-    // ── MỚI: Firestore async queue ───────────────────────────────
-    firestoreHistory.loop();
-
     uint32_t now = millis();
+
+    // Upload telemetry/analytics/relay/status/water_change mỗi 5s
     if (now - _lastUploadMs >= FIREBASE_UPLOAD_INTERVAL_MS) {
         _lastUploadMs = now;
-        _uploadAll(clean, analytics, relayState,
-                   lastSafetyEvent, safeMode);
+        _uploadAll(clean, analytics, relayState, lastSafetyEvent, safeMode);
+    }
 
-        // ── MỚI: Tích lũy mẫu vào Firestore history buffer ──────
-        // Dùng giá trị clean trực tiếp — fallback đã qua pipeline,
-        // vẫn là giá trị hợp lệ nhất có thể. ingest() tự lọc NaN.
-        firestoreHistory.ingest(clean.temperature, clean.ph, clean.tds);
+    // Ghi history vào RTDB mỗi 60s
+    if (now - _lastHistoryMs >= FIREBASE_HISTORY_INTERVAL_MS) {
+        _lastHistoryMs = now;
+        _uploadHistory(clean);
     }
 
     _checkStreamHealth();
@@ -337,8 +326,30 @@ String AquaFirebaseClient::_buildStatusJson(SafetyEvent e, bool safeMode) {
 }
 
 // ================================================================
-// PUSH SAFETY EVENT
+// UPLOAD HISTORY — ghi 1 record vào RTDB mỗi 60s
+// Path: /devices/{id}/history/{unix_timestamp}
+// Key là Unix timestamp (giây) → sort tự nhiên theo thời gian
 // ================================================================
+void AquaFirebaseClient::_uploadHistory(const CleanReading& c) {
+    time_t now = time(nullptr);
+    if (now < 1700000000L) return;  // NTP chưa sync → bỏ qua
+
+    char path[64];
+    snprintf(path, sizeof(path), DB_ROOT "/history/%ld", (long)now);
+
+    char body[80];
+    snprintf(body, sizeof(body),
+        "{\"temp\":%.2f,\"ph\":%.3f,\"tds\":%.1f}",
+        c.temperature, c.ph, c.tds);
+
+    Database.set<object_t>(aClient, path,
+        object_t(body), onUploadResult, "upHist");
+
+    LOG_DEBUG("FB", "History: ts=%ld T=%.2f pH=%.3f TDS=%.1f",
+              (long)now, c.temperature, c.ph, c.tds);
+}
+
+
 void AquaFirebaseClient::pushSafetyEvent(SafetyEvent evt) {
     if (!_ready || !wifiManager.isConnected()) return;
     Database.set<String>(aClient,

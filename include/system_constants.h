@@ -71,10 +71,15 @@
 #define SENSOR_HISTORY_SIZE       120    // Lịch sử: 120 mẫu = 10 phút
 
 // ----------------------------------------------------------------
-// WATER CHANGE DEFAULTS
+// WATER CHANGE DEFAULTS & LIMITS
+// Dùng làm giá trị mặc định khi NVS chưa có dữ liệu.
+// Admin có thể thay đổi runtime qua Firebase (lưu trong WaterChangeSchedule).
 // ----------------------------------------------------------------
 #define WATER_CHANGE_DEFAULT_PUMP_OUT_SEC   30
 #define WATER_CHANGE_DEFAULT_PUMP_IN_SEC    60
+#define WATER_CHANGE_MIN_PUMP_SEC           10    // Default: tối thiểu 10 giây
+#define WATER_CHANGE_MAX_PUMP_OUT_SEC       300   // Default: tối đa 5 phút bơm ra
+#define WATER_CHANGE_MAX_PUMP_IN_SEC        600   // Default: tối đa 10 phút bơm vào
 
 // ----------------------------------------------------------------
 // PH CALIBRATION

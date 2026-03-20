@@ -56,15 +56,25 @@ void WaterChangeManager::restoreLastRun(uint32_t savedDay, uint32_t savedTs) {
 
 // ----------------------------------------------------------------
 void WaterChangeManager::setConfig(const WaterChangeConfig& cfg) {
-    // Validate
+    // Validate — dùng compile-time constants làm hard floor/ceiling tuyệt đối.
+    // Runtime limits (pump_min_sec / pump_out_max_sec / pump_in_max_sec) đã được
+    // configManager validate và enforce trước khi gọi setConfig().
     if (cfg.schedule_hour > 23 || cfg.schedule_minute > 59) {
         LOG_ERROR("WATER", "Invalid schedule time %02d:%02d — config rejected",
                   cfg.schedule_hour, cfg.schedule_minute);
         return;
     }
-    if (cfg.pump_out_sec < 10 || cfg.pump_in_sec < 10) {
-        LOG_ERROR("WATER", "pump_out_sec=%d or pump_in_sec=%d < 10 — config rejected",
-                  cfg.pump_out_sec, cfg.pump_in_sec);
+    if (cfg.pump_out_sec < WATER_CHANGE_MIN_PUMP_SEC ||
+        cfg.pump_in_sec  < WATER_CHANGE_MIN_PUMP_SEC) {
+        LOG_ERROR("WATER", "pump time < hard floor %ds — config rejected (out=%d in=%d)",
+                  WATER_CHANGE_MIN_PUMP_SEC, cfg.pump_out_sec, cfg.pump_in_sec);
+        return;
+    }
+    if (cfg.pump_out_sec > WATER_CHANGE_MAX_PUMP_OUT_SEC ||
+        cfg.pump_in_sec  > WATER_CHANGE_MAX_PUMP_IN_SEC) {
+        LOG_ERROR("WATER", "pump time exceeds hard ceiling (out=%d/%d in=%d/%d) — config rejected",
+                  cfg.pump_out_sec, WATER_CHANGE_MAX_PUMP_OUT_SEC,
+                  cfg.pump_in_sec,  WATER_CHANGE_MAX_PUMP_IN_SEC);
         return;
     }
 
