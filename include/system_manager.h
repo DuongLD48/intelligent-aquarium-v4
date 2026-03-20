@@ -52,14 +52,18 @@ public:
 private:
     bool     _safeMode;
     bool     _ntpSynced;
-    bool     _multiSensorLost;    // true = safe mode do temp + pH cùng mất
-    uint8_t  _highFsiCount;       // Số chu kỳ liên tiếp FSI > 50
+    bool     _multiSensorLost;
+    uint8_t  _highFsiCount;
     uint32_t _lastNtpAttemptMs;
+    uint32_t _lastNtpSyncMs;      // millis() lần sync NTP thành công gần nhất
+    bool     _lastWifiState;      // trạng thái WiFi chu kỳ trước — detect reconnect
 
     static constexpr float    SAFE_MODE_FSI_THRESHOLD  = 50.0f;
     static constexpr uint8_t  SAFE_MODE_FSI_CYCLES     = 5;
     static constexpr uint32_t NTP_RETRY_INTERVAL_MS    = 30000;
+    static constexpr uint32_t NTP_RESYNC_INTERVAL_MS   = 6UL * 3600UL * 1000UL; // re-sync mỗi 6h
     static constexpr uint32_t WATCHDOG_TIMEOUT_S       = 30;
+    static constexpr uint32_t MIN_FREE_HEAP_BYTES       = 30000; // restart Firebase nếu heap < 30KB
 
     void _enterSafeMode();
     void _exitSafeMode();

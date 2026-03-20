@@ -153,6 +153,33 @@ AquaFirebaseClient::AquaFirebaseClient()
       _lastSettingsStreamMs(0), _lastTriggerStreamMs(0) {}
 
 // ================================================================
+// RESTART — reset Firebase state sạch, dùng lại SSL objects đã có
+// Gọi khi: WiFi reconnect hoặc heap < MIN_FREE_HEAP_BYTES
+// ================================================================
+void AquaFirebaseClient::restart() {
+    LOG_WARNING("FB", "Restarting Firebase client...");
+    _ready = false;
+
+    // Re-init auth + database binding
+    initializeApp(aClient, app, getAuth(legacy_auth), onUploadResult, "authRestart");
+    app.getApp<RealtimeDatabase>(Database);
+    Database.url(FIREBASE_URL);
+
+    // Restart cả 2 stream
+    _startSettingsStream();
+    _startTriggerStream();
+
+    _ready = true;
+    uint32_t now = millis();
+    _lastUploadMs         = now;
+    _lastHistoryMs        = now;
+    _lastSettingsStreamMs = now;
+    _lastTriggerStreamMs  = now;
+
+    LOG_INFO("FB", "Firebase restarted. heap=%lu", (unsigned long)ESP.getFreeHeap());
+}
+
+// ================================================================
 // BEGIN
 // ================================================================
 void AquaFirebaseClient::begin() {
@@ -205,9 +232,12 @@ void AquaFirebaseClient::loop(
 
     uint32_t now = millis();
 
-    // Upload telemetry/analytics/relay/status/water_change mỗi 5s
+    // Upload telemetry/analytics/relay/status/water_change mỗi 10s
     if (now - _lastUploadMs >= FIREBASE_UPLOAD_INTERVAL_MS) {
         _lastUploadMs = now;
+        LOG_DEBUG("FB", "heap=%lu minHeap=%lu",
+                  (unsigned long)ESP.getFreeHeap(),
+                  (unsigned long)ESP.getMinFreeHeap());
         _uploadAll(clean, analytics, relayState, lastSafetyEvent, safeMode);
     }
 
@@ -227,32 +257,26 @@ void AquaFirebaseClient::_uploadAll(
     const CleanReading& c, const AnalyticsResult& a,
     const RelayCommand& r, SafetyEvent lastEvt, bool safeMode)
 {
-    String t  = _buildTelemetryJson(c);
-    String an = _buildAnalyticsJson(a);
-    String rl = _buildRelayJson(r);
-    String st = _buildStatusJson(lastEvt, safeMode);
-
+    // 4 set riêng — mỗi node độc lập
     Database.set<object_t>(aClient, DB_PATH("telemetry"),
-        object_t(t.c_str()),  onUploadResult, "upTel");
+        object_t(_buildTelemetryJson(c).c_str()),              onUploadResult, "upTel");
     Database.set<object_t>(aClient, DB_PATH("analytics"),
-        object_t(an.c_str()), onUploadResult, "upAna");
+        object_t(_buildAnalyticsJson(a).c_str()),              onUploadResult, "upAna");
     Database.set<object_t>(aClient, DB_PATH("relay_state"),
-        object_t(rl.c_str()), onUploadResult, "upRly");
+        object_t(_buildRelayJson(r).c_str()),                  onUploadResult, "upRly");
     Database.set<object_t>(aClient, DB_PATH("status"),
-        object_t(st.c_str()), onUploadResult, "upSta");
+        object_t(_buildStatusJson(lastEvt, safeMode).c_str()), onUploadResult, "upSta");
 
-    // Water change: chỉ set từng field, không set toàn node
-    // (tránh xoá manual_trigger của Web)
+    // water_change: set từng field riêng để không đụng manual_trigger của Web
     Database.set<String>  (aClient, DB_PATH("water_change/state"),
         String(_wcStateStr(waterChangeManager.getState())),
-        onUploadResult, "upWC_state");
+        onUploadResult, "upWC_st");
     Database.set<number_t>(aClient, DB_PATH("water_change/last_run"),
         number_t((double)waterChangeManager.lastRunDay(), 0),
         onUploadResult, "upWC_day");
     Database.set<number_t>(aClient, DB_PATH("water_change/last_run_ts"),
         number_t((double)waterChangeManager.lastRunTs(), 0),
         onUploadResult, "upWC_ts");
-    // trigger_source được ghi riêng bởi _writeTriggerSource()
 }
 
 // ================================================================

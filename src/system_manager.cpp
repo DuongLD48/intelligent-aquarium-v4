@@ -11,6 +11,7 @@
 #include "system_constants.h"
 #include "credentials.h"
 #include <esp_task_wdt.h>
+#include <esp_system.h>
 #include <Arduino.h>
 
 // ================================================================
@@ -31,8 +32,25 @@ SystemManager::SystemManager()
 void SystemManager::begin() {
     // 1. Logger — trước tiên để các bước sau có thể log
     Logger::instance().init(115200);
-    Logger::instance().setLevel(LogLevel::DEBUG);
+    Logger::instance().setLevel(LogLevel::VERBOSE);
     LOG_INFO("SYS", "=== Intelligent Aquarium v4.0 booting ===");
+
+    // Log reset reason — quan trọng để debug crash/watchdog
+    esp_reset_reason_t reason = esp_reset_reason();
+    const char* reasonStr = "UNKNOWN";
+    switch (reason) {
+        case ESP_RST_POWERON:   reasonStr = "POWER_ON";    break;
+        case ESP_RST_SW:        reasonStr = "SOFTWARE";    break;
+        case ESP_RST_PANIC:     reasonStr = "PANIC/CRASH"; break;
+        case ESP_RST_INT_WDT:   reasonStr = "INT_WATCHDOG";break;
+        case ESP_RST_TASK_WDT:  reasonStr = "TASK_WATCHDOG"; break;
+        case ESP_RST_WDT:       reasonStr = "WATCHDOG";    break;
+        case ESP_RST_DEEPSLEEP: reasonStr = "DEEP_SLEEP";  break;
+        case ESP_RST_BROWNOUT:  reasonStr = "BROWNOUT";    break;
+        case ESP_RST_SDIO:      reasonStr = "SDIO";        break;
+        default: break;
+    }
+    LOG_INFO("SYS", "Reset reason: %s (%d)", reasonStr, (int)reason);
 
     // 2. SafetyCore — relay pins OUTPUT + tắt hết ngay từ đầu
     safetyCore.begin();

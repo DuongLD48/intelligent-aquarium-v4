@@ -2,8 +2,6 @@
 
 // ================================================================
 // CRITICAL: Phải define ENABLE_DATABASE TRƯỚC khi include FirebaseClient.h
-// Không có define này → RealtimeDatabase.h sẽ không được include
-// (xem FirebaseClient.h line 25: #if defined(ENABLE_DATABASE))
 // ================================================================
 #define ENABLE_DATABASE
 #define ENABLE_LEGACY_TOKEN
@@ -15,10 +13,10 @@
 #include <Arduino.h>
 
 // ================================================================
-// wifi_firebase.h — Intelligent Aquarium v4.0
+// wifi_firebase.h — Intelligent Aquarium v4.2
 //
 // WiFiManager  : kết nối WiFi non-blocking + auto-reconnect
-// AquaFirebaseClient: upload telemetry 5s + 2 SSE streams
+// AquaFirebaseClient: upload telemetry 10s + 2 SSE streams
 //
 // Thư viện: mobizt/FirebaseClient (v2.x)
 //   platformio.ini:
@@ -26,34 +24,27 @@
 //
 // ── SCHEMA ──────────────────────────────────────────────────────
 //  /devices/{DEVICE_ID}/
-//    telemetry/         ← ESP32 ghi 5s
-//    analytics/         ← ESP32 ghi 5s
-//    relay_state/       ← ESP32 ghi 5s
-//    status/            ← ESP32 ghi 5s (safe_mode, last_safety_event)
-//    water_change/      ← ESP32 ghi state/last_run/trigger_source
+//    telemetry/         <- ESP32 ghi 10s
+//    analytics/         <- ESP32 ghi 10s
+//    relay_state/       <- ESP32 ghi 10s
+//    status/            <- ESP32 ghi 10s
+//    water_change/      <- ESP32 ghi state/last_run/trigger_source
 //                         Web ghi manual_trigger=true
-//    settings/          ← Web ghi, ESP32 stream (1 stream)
-//    history/{ts}       ← ESP32 ghi 60s {temp, ph, tds}
-//                         ts = Unix timestamp (giây) — sort tự nhiên
+//    settings/          <- Web ghi, ESP32 stream
+//    history/{ts}       <- ESP32 ghi 60s {temp, ph, tds}
 //
 // ── 2 STREAMS ───────────────────────────────────────────────────
-//  Stream1: /settings        → parse 5 config groups
-//  Stream2: /manual_trigger  → kích hoạt thay nước từ Web
-//
-// ── TRIGGER SOURCE ───────────────────────────────────────────────
-//  Nút vật lý  : firebaseClient.notifyButtonTrigger()
-//  Lịch tự động: firebaseClient.notifyScheduleTrigger()
-//  Web          : tự động qua Stream2
-//  Xong         : firebaseClient.notifyTriggerDone()
+//  Stream1: /settings        -> parse 5 config groups
+//  Stream2: /manual_trigger  -> kich hoat thay nuoc tu Web
 // ================================================================
 
 // ----------------------------------------------------------------
 // TIMING CONSTANTS
 // ----------------------------------------------------------------
 #define WIFI_RECONNECT_INTERVAL_MS    5000UL
-#define FIREBASE_UPLOAD_INTERVAL_MS   5000UL
-#define FIREBASE_HISTORY_INTERVAL_MS 60000UL  // ghi history mỗi 60s vào RTDB
-#define FIREBASE_STREAM_RETRY_MS     60000UL  // stream tự reconnect, chỉ restart nếu stale >60s
+#define FIREBASE_UPLOAD_INTERVAL_MS  10000UL
+#define FIREBASE_HISTORY_INTERVAL_MS 60000UL
+#define FIREBASE_STREAM_RETRY_MS     60000UL
 
 // ----------------------------------------------------------------
 // DB PATH HELPERS
@@ -81,17 +72,14 @@ private:
 
 // ================================================================
 // AquaFirebaseClient
-// (Đổi tên từ FirebaseClient để tránh trùng firebase_ns::FirebaseClient)
 // ================================================================
 class AquaFirebaseClient {
 public:
     AquaFirebaseClient();
 
-    // Gọi từ SystemManager sau khi WiFi kết nối lần đầu
     void begin();
+    void restart();
 
-    // Gọi mỗi loop()
-    // Dữ liệu WaterChange đọc trực tiếp từ waterChangeManager singleton bên trong.
     void loop(
         const CleanReading&    clean,
         const AnalyticsResult& analytics,
@@ -100,35 +88,29 @@ public:
         bool                   safeMode
     );
 
-    // Push ngay lập tức (không chờ 5s)
     void pushSafetyEvent(SafetyEvent evt);
 
-    // Trigger source — gọi từ bên ngoài
-    void notifyButtonTrigger();    // main.cpp: nút vật lý → "BUTTON"
-    void notifyScheduleTrigger();  // WaterChangeManager: lịch → "SCHEDULE"
-    void notifyTriggerDone();      // Khi water change xong → "NONE"
+    void notifyButtonTrigger();
+    void notifyScheduleTrigger();
+    void notifyTriggerDone();
 
     bool isReady() const { return _ready; }
 
-    // ── Semi-public: chỉ để free-function callback truy cập ──────
-    // Không gọi trực tiếp từ bên ngoài
+    // Semi-public: chi de free-function callback truy cap
     uint32_t _lastSettingsStreamMs;
     uint32_t _lastTriggerStreamMs;
-    // path = RTDB.dataPath(), data = r.c_str() từ SSE event
     void _onSettingsPayload(const char* path, const char* data);
     void _onTriggerPayload (bool triggered);
 
 private:
     bool     _ready;
     uint32_t _lastUploadMs;
-    uint32_t _lastHistoryMs;   // timestamp lần ghi history gần nhất
+    uint32_t _lastHistoryMs;
 
-    // Upload — WaterChange đọc trực tiếp từ waterChangeManager singleton
     void _uploadAll(
         const CleanReading& c, const AnalyticsResult& a,
         const RelayCommand& r, SafetyEvent lastEvt, bool safeMode);
 
-    // Ghi history 60s một lần vào RTDB /history/{unix_ts}
     void _uploadHistory(const CleanReading& c);
 
     String _buildTelemetryJson  (const CleanReading&    c);
@@ -136,16 +118,13 @@ private:
     String _buildRelayJson      (const RelayCommand&    cmd);
     String _buildStatusJson     (SafetyEvent e, bool safeMode);
 
-    // Stream management
     void _startSettingsStream();
     void _startTriggerStream();
     void _checkStreamHealth();
 
-    // Trigger source (private)
     void _notifyWebTrigger();
     void _writeTriggerSource(const char* source);
 
-    // Enum → string
     static const char* _wcStateStr      (WaterChangeState s);
     static const char* _safetyEventStr  (SafetyEvent      e);
     static const char* _dataSourceStr   (DataSource       s);
@@ -154,7 +133,7 @@ private:
 };
 
 // ----------------------------------------------------------------
-// Global singletons — dùng trong main.cpp, system_manager.cpp
+// Global singletons
 // ----------------------------------------------------------------
 extern WiFiManager         wifiManager;
 extern AquaFirebaseClient  firebaseClient;

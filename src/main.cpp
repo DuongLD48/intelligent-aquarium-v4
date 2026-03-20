@@ -21,6 +21,7 @@
 #include "button_manager.h"
 #include "wifi_firebase.h"
 #include "system_manager.h"
+#include "firestore_history.h"
 
 // ================================================================
 // main.cpp
@@ -200,8 +201,6 @@ static void debugPrintCycle(const CleanReading& c,
         (int)wc.schedule_hour, (int)wc.schedule_minute,
         (int)wc.pump_out_sec,  (int)wc.pump_in_sec
     );
-    // ── RTDB History ──────────────────────────────────────────────
-    LOG_DEBUG("HIST", "RTDB history: path=" DB_ROOT "/history/{ts} interval=60s");
     LOG_DEBUG("END DEBUG", "------------------------------------------------------------");
 }
 
@@ -235,6 +234,7 @@ void setup() {
 // ================================================================
 void loop() {
     // ── BƯỚC 1: Đọc nút bấm + điều hướng menu ──────────────────
+    LOG_DEBUG("LOOP", "step1 btn");
     buttonManager.update();
  
     // handleButtons() xử lý UP/DOWN/SELECT/BACK theo màn hình hiện tại
@@ -246,40 +246,41 @@ void loop() {
     }
 
     // ── BƯỚC 2: System update (watchdog + safe mode check) ──────
+    LOG_DEBUG("LOOP", "step2 sysupdate");
     systemManager.update(gClean, gAnalytics);
 
     // ── BƯỚC 3: pH pulse timer (tắt relay khi hết thời gian) ───
-    // Chạy trước safe mode check: cần tắt relay đúng cách dù safe mode
+    LOG_DEBUG("LOOP", "step3 phpulse");
     tickPhPulse();
 
     // ── BƯỚC 4: Water change state machine ──────────────────────
-    // QUAN TRỌNG: Luôn chạy dù safe mode — bơm đang hoạt động cần
-    // được tắt đúng cách theo timer, không để treo ở PUMPING_OUT mãi.
+    LOG_DEBUG("LOOP", "step4 wc");
     {
         WaterChangeState wcBefore = waterChangeManager.getState();
         waterChangeManager.update();
         WaterChangeState wcAfter  = waterChangeManager.getState();
-        // Vừa chuyển về IDLE sau khi DONE → báo Firebase trigger_source = NONE
         if (wcBefore == WaterChangeState::DONE &&
             wcAfter  == WaterChangeState::IDLE) {
             firebaseClient.notifyTriggerDone();
         }
     }
 
-    // Nếu đang safe mode → bỏ qua bước điều khiển (13-17)
     if (systemManager.isSafeMode()) {
         goto step_firebase;
     }
 
 step_firebase:
     // ── BƯỚC 5: Serial config handler ───────────────────────────
+    LOG_DEBUG("LOOP", "step5 serial");
     configManager.handleSerial();
 
     // ── BƯỚC 6: WiFi loop (reconnect) ───────────────────────────
+    LOG_DEBUG("LOOP", "step6 wifi");
     gWifiConnected = wifiManager.isConnected();
     wifiManager.loop();
 
     // ── BƯỚC 7: Firebase loop (stream + upload mỗi 5s) ──────────
+    LOG_DEBUG("LOOP", "step7 firebase");
     firebaseClient.loop(
         gClean,
         gAnalytics,
@@ -289,6 +290,7 @@ step_firebase:
     );
 
     // ── BƯỚC 8: OLED render (throttle 500ms) ────────────────────
+    LOG_DEBUG("LOOP", "step8 oled");
     oledDisplay.update(
         gClean,
         gAnalytics,
@@ -299,6 +301,7 @@ step_firebase:
     );
 
     // ── BƯỚC 9: Đọc sensor (mỗi 5 giây) ────────────────────────
+    LOG_DEBUG("LOOP", "step9 sensor");
     bool newSample = readSensors();
     if (!newSample) {
         // Chưa đến chu kỳ → yield và thoát sớm

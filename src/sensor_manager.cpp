@@ -39,8 +39,13 @@ static constexpr float TDS_TEMP_REF_C    = 25.0f;
 // State nội bộ
 // ----------------------------------------------------------------
 static unsigned long _lastReadMs     = 0;
-static float         _lastRawTemp    = NAN;  // Lưu giá trị hợp lệ cuối
+static unsigned long _tempRequestMs  = 0;   // millis() khi gửi requestTemperatures()
+static bool          _tempRequested  = false; // đang chờ DS18B20 convert
+static float         _lastRawTemp    = NAN;
 static bool          _initialized    = false;
+
+// DS18B20 conversion time tối đa ở 12-bit = 750ms
+static constexpr unsigned long DS18B20_CONVERSION_MS = 800UL; // 50ms margin
 
 // ----------------------------------------------------------------
 // Helpers — chuyển đổi ADC → giá trị vật lý
@@ -74,33 +79,6 @@ static float _voltageToTds(float voltage, float tempC) {
     if (compensation < 0.01f) compensation = 0.01f;  // Tránh chia 0
 
     return (tdsRaw / compensation) * TDS_CALIB_FACTOR;
-}
-
-// ----------------------------------------------------------------
-// Đọc DS18B20
-// Trả về nhiệt độ °C, hoặc NaN nếu lỗi.
-// Giữ lại _lastRawTemp nếu đọc thất bại.
-// ----------------------------------------------------------------
-static float _readTemperature() {
-    dsSensor.requestTemperatures();
-    float t = dsSensor.getTempCByIndex(0);
-
-    // Kiểm tra các trường hợp lỗi
-    if (t == DEVICE_DISCONNECTED_C) {
-        LOG_WARNING("SENSOR", "DS18B20 disconnected");
-        return NAN;
-    }
-    if (isnan(t)) {
-        LOG_WARNING("SENSOR", "DS18B20 returned NaN");
-        return NAN;
-    }
-    if (t < DS18B20_MIN_C || t > DS18B20_MAX_C) {
-        LOG_WARNING("SENSOR", "DS18B20 out of range: %.2f", t);
-        return NAN;
-    }
-
-    _lastRawTemp = t;  // Cập nhật last valid raw
-    return t;
 }
 
 // ----------------------------------------------------------------
@@ -145,8 +123,9 @@ static float _readTds(float currentTemp) {
 // ================================================================
 
 void sensor_manager_init() {
-    // DS18B20
+    // DS18B20 — async mode: requestTemperatures() không block
     dsSensor.begin();
+    dsSensor.setWaitForConversion(false);  // NON-BLOCKING
     uint8_t count = dsSensor.getDeviceCount();
     if (count == 0) {
         LOG_ERROR("SENSOR", "No DS18B20 found on GPIO %d!", PIN_DS18B20);
@@ -167,17 +146,38 @@ bool readSensors() {
     if (!_initialized) return false;
 
     unsigned long now = millis();
-    if (now - _lastReadMs < SENSOR_READ_INTERVAL_MS) {
-        return false;  // Chưa đến chu kỳ
+
+    // ── Bước A: Gửi lệnh request sớm 800ms trước chu kỳ đọc ─────
+    // requestTemperatures() non-blocking, trả về ngay lập tức
+    if (!_tempRequested &&
+        now - _lastReadMs >= (SENSOR_READ_INTERVAL_MS - DS18B20_CONVERSION_MS)) {
+        dsSensor.requestTemperatures();
+        _tempRequestMs = now;
+        _tempRequested = true;
     }
-    _lastReadMs = now;
 
-    // --- Đọc phần cứng ---
-    float temp = _readTemperature();
-    float ph   = _readPh();
-    float tds  = _readTds(isnan(temp) ? _lastRawTemp : temp);
+    // ── Bước B: Chưa đến chu kỳ 5s → thoát sớm ─────────────────
+    if (now - _lastReadMs < SENSOR_READ_INTERVAL_MS) {
+        return false;
+    }
+    _lastReadMs    = now;
+    _tempRequested = false;  // reset cho chu kỳ tiếp
 
-    // --- Tạo SensorReading và push vào buffer ---
+    // ── Bước C: Đọc kết quả (conversion đã xong từ ~800ms trước) ─
+    float temp = NAN;
+    float t = dsSensor.getTempCByIndex(0);
+    if (t == DEVICE_DISCONNECTED_C || isnan(t)) {
+        LOG_WARNING("SENSOR", "DS18B20 read failed");
+    } else if (t < DS18B20_MIN_C || t > DS18B20_MAX_C) {
+        LOG_WARNING("SENSOR", "DS18B20 out of range: %.2f", t);
+    } else {
+        temp = t;
+        _lastRawTemp = t;
+    }
+
+    float ph  = _readPh();
+    float tds = _readTds(isnan(temp) ? _lastRawTemp : temp);
+
     SensorReading reading;
     reading.timestamp   = now;
     reading.temperature = temp;
@@ -189,7 +189,7 @@ bool readSensors() {
     LOG_DEBUG("SENSOR", "Raw T=%.2f pH=%.3f TDS=%.1f ts=%lu",
               temp, ph, tds, now);
 
-    return true;  // Có mẫu mới
+    return true;
 }
 
 // ----------------------------------------------------------------
