@@ -362,27 +362,26 @@ SafetyEvent SafetyCore::_checkPhPumpTiming(RelayCommand& cmd) {
 
 // ================================================================
 // CHECK 7 — SHOCK GUARD
-// Nếu có shock flag → tạm dừng điều khiển heater/cooler/pH pump
-// 1 chu kỳ để sensor ổn định. Pump in/out không bị ảnh hưởng.
+// Nếu có shock flag → tạm dừng điều khiển pH pump 1 chu kỳ.
+// KHÔNG tắt heater/cooler khi đang chạy ổn định — shock nhiệt độ
+// có thể do nước thay nước, sò, hoặc cooler/heater đang hoạt động
+// bình thường. Tắt cooler/heater giữa chừng gây chattering.
 // ================================================================
 SafetyEvent SafetyCore::_checkShockGuard(RelayCommand& cmd, const CleanReading& clean) {
     bool hasShock = clean.has_shock();
 
     if (_shockHold) {
-        // Chu kỳ trước có shock → tạm dừng chu kỳ này, reset hold
-        cmd.heater  = false;
-        cmd.cooler  = false;
+        // Chu kỳ trước có shock → chỉ tạm dừng pH pump, không đụng heater/cooler
         cmd.ph_up   = false;
         cmd.ph_down = false;
         _shockHold  = false;
-        LOG_WARNING("SAFETY", "ShockGuard: holding 1 cycle");
+        LOG_WARNING("SAFETY", "ShockGuard: holding pH pump 1 cycle");
         return SafetyEvent::SHOCK_GUARD;
     }
 
     if (hasShock) {
-        // Đặt cờ để tạm dừng chu kỳ tiếp theo
         _shockHold = true;
-        LOG_WARNING("SAFETY", "Shock detected (T=%d pH=%d) → will hold next cycle",
+        LOG_WARNING("SAFETY", "Shock detected (T=%d pH=%d) → will hold pH pump next cycle",
                     clean.shock_temperature, clean.shock_ph);
     }
 

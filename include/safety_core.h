@@ -86,7 +86,7 @@ struct SafetyLimits {
     uint32_t heater_cooldown_ms      = 5UL  * 60000UL; // 5 phút
     uint32_t ph_pump_max_pulse_ms    = 3000UL;         // 3 giây
     uint32_t ph_pump_min_interval_ms = 30000UL;        // 30 giây
-    uint8_t  stale_sensor_threshold  = 6;              // Số chu kỳ fallback liên tiếp
+    uint8_t  stale_sensor_threshold  = 12;              // Số chu kỳ fallback liên tiếp
     // ※ LOẠI BỎ: water_critical_low_cm
 };
 

@@ -32,7 +32,7 @@ SystemManager::SystemManager()
 void SystemManager::begin() {
     // 1. Logger — trước tiên để các bước sau có thể log
     Logger::instance().init(115200);
-    Logger::instance().setLevel(LogLevel::VERBOSE);
+    Logger::instance().setLevel(LogLevel::DEBUG);
     LOG_INFO("SYS", "=== Intelligent Aquarium v4.0 booting ===");
 
     // Log reset reason — quan trọng để debug crash/watchdog

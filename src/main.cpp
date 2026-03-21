@@ -234,7 +234,7 @@ void setup() {
 // ================================================================
 void loop() {
     // ── BƯỚC 1: Đọc nút bấm + điều hướng menu ──────────────────
-    LOG_DEBUG("LOOP", "step1 btn");
+    // LOG_DEBUG("LOOP", "step1 btn");
     buttonManager.update();
  
     // handleButtons() xử lý UP/DOWN/SELECT/BACK theo màn hình hiện tại
@@ -246,15 +246,15 @@ void loop() {
     }
 
     // ── BƯỚC 2: System update (watchdog + safe mode check) ──────
-    LOG_DEBUG("LOOP", "step2 sysupdate");
+    // LOG_DEBUG("LOOP", "step2 sysupdate");
     systemManager.update(gClean, gAnalytics);
 
     // ── BƯỚC 3: pH pulse timer (tắt relay khi hết thời gian) ───
-    LOG_DEBUG("LOOP", "step3 phpulse");
+    // LOG_DEBUG("LOOP", "step3 phpulse");
     tickPhPulse();
 
     // ── BƯỚC 4: Water change state machine ──────────────────────
-    LOG_DEBUG("LOOP", "step4 wc");
+    // LOG_DEBUG("LOOP", "step4 wc");
     {
         WaterChangeState wcBefore = waterChangeManager.getState();
         waterChangeManager.update();
@@ -271,16 +271,16 @@ void loop() {
 
 step_firebase:
     // ── BƯỚC 5: Serial config handler ───────────────────────────
-    LOG_DEBUG("LOOP", "step5 serial");
+    // LOG_DEBUG("LOOP", "step5 serial");
     configManager.handleSerial();
 
     // ── BƯỚC 6: WiFi loop (reconnect) ───────────────────────────
-    LOG_DEBUG("LOOP", "step6 wifi");
+    // LOG_DEBUG("LOOP", "step6 wifi");
     gWifiConnected = wifiManager.isConnected();
     wifiManager.loop();
 
     // ── BƯỚC 7: Firebase loop (stream + upload mỗi 5s) ──────────
-    LOG_DEBUG("LOOP", "step7 firebase");
+    // LOG_DEBUG("LOOP", "step7 firebase");
     firebaseClient.loop(
         gClean,
         gAnalytics,
@@ -290,7 +290,7 @@ step_firebase:
     );
 
     // ── BƯỚC 8: OLED render (throttle 500ms) ────────────────────
-    LOG_DEBUG("LOOP", "step8 oled");
+    // LOG_DEBUG("LOOP", "step8 oled");
     oledDisplay.update(
         gClean,
         gAnalytics,
@@ -301,7 +301,7 @@ step_firebase:
     );
 
     // ── BƯỚC 9: Đọc sensor (mỗi 5 giây) ────────────────────────
-    LOG_DEBUG("LOOP", "step9 sensor");
+    // LOG_DEBUG("LOOP", "step9 sensor");
     bool newSample = readSensors();
     if (!newSample) {
         // Chưa đến chu kỳ → yield và thoát sớm

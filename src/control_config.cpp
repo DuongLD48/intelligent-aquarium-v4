@@ -11,7 +11,7 @@ ConfigError ConfigValidator::validate(const ControlConfig& cfg) {
     if (cfg.temp_min < 10.0f)                          return ConfigError::TEMP_MIN_TOO_LOW;
     if (cfg.temp_max > 40.0f)                          return ConfigError::TEMP_MAX_TOO_HIGH;
     if (cfg.temp_min >= cfg.temp_max)                  return ConfigError::TEMP_MIN_GE_MAX;
-    if ((cfg.temp_max - cfg.temp_min) < 2.0f)          return ConfigError::TEMP_RANGE_TOO_NARROW;
+    if ((cfg.temp_max - cfg.temp_min) < 0.5f)          return ConfigError::TEMP_RANGE_TOO_NARROW;
 
     // --- pH ---
     if (cfg.ph_min < 4.0f)                             return ConfigError::PH_MIN_TOO_LOW;
@@ -38,7 +38,7 @@ const char* ConfigValidator::errorString(ConfigError err) {
         case ConfigError::OK:                   return "OK";
         case ConfigError::TEMP_MIN_TOO_LOW:     return "temp_min < 10";
         case ConfigError::TEMP_MAX_TOO_HIGH:    return "temp_max > 40";
-        case ConfigError::TEMP_RANGE_TOO_NARROW:return "temp range < 2 deg";
+        case ConfigError::TEMP_RANGE_TOO_NARROW:return "temp range < 0.5 deg";
         case ConfigError::TEMP_MIN_GE_MAX:      return "temp_min >= temp_max";
         case ConfigError::PH_MIN_TOO_LOW:       return "ph_min < 4.0";
         case ConfigError::PH_MAX_TOO_HIGH:      return "ph_max > 10.0";

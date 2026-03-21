@@ -135,13 +135,14 @@ DataPipeline::FieldResult DataPipeline::_processField(
 
     // ============================================================
     // TẦNG 2 — MAD FILTER
-    // Push raw vào validBuf TRƯỚC khi tính MAD
+    // Tính MAD dựa trên validBuf hiện tại (chưa push raw mới)
+    // Chỉ push raw vào validBuf nếu pass MAD → buffer luôn sạch
     // ============================================================
-    validBuf.push(raw);
     size_t n = validBuf.size();
 
     if (n < _cfg.mad_min_samples) {
-        // Chưa đủ mẫu → bypass MAD, accept luôn
+        // Chưa đủ mẫu → bypass MAD, accept và push luôn
+        validBuf.push(raw);
         result.value        = raw;
         result.source       = DataSource::MEASURED;
         result.status       = FieldStatus::OK;
@@ -153,7 +154,7 @@ DataPipeline::FieldResult DataPipeline::_processField(
         return result;
     }
 
-    // Tính median của validBuf
+    // Tính median của validBuf hiện tại (chưa có raw mới)
     float med = _median(validBuf);
 
     // Tính MAD = median(|xi - median|)
@@ -194,7 +195,8 @@ DataPipeline::FieldResult DataPipeline::_processField(
         LOG_DEBUG("PIPELINE", "MAD outlier: raw=%.3f z=%.3f > %.3f → fallback median=%.3f",
                   raw, z, _cfg.mad_threshold, med);
     } else {
-        // ACCEPT
+        // ACCEPT — push vào validBuf để dùng cho các chu kỳ sau
+        validBuf.push(raw);
         result.value  = raw;
         result.source = DataSource::MEASURED;
         result.status = FieldStatus::OK;
