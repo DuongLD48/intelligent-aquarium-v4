@@ -184,12 +184,28 @@ DataPipeline::FieldResult DataPipeline::_processField(
                 (int)n, med, madVal, z);
 
     if (z > _cfg.mad_threshold) {
+        fallbackCount = (fallbackCount < 255) ? fallbackCount + 1 : 255;
+
+        // MAD lock detection: fallback quá lâu → thực tế đã thay đổi thật sự
+        // Push raw vào buffer (KHÔNG clear) để median dịch chuyển dần,
+        // tránh tạo lock ngược chiều sau khi force accept
+        if (fallbackCount >= _cfg.mad_min_samples) {
+            validBuf.push(raw);
+            result.value  = raw;
+            result.source = DataSource::MEASURED;
+            result.status = FieldStatus::OK;
+            fallbackCount = 0;
+            result.fallback_count = 0;
+            lastGood    = raw;
+            hasLastGood = true;
+            LOG_WARNING("PIPELINE", "MAD lock → force accept %.3f, buffer kept", raw);
+            return result;
+        }
+
         // OUTLIER — dùng median của validBuf làm fallback
         result.value  = med;   // ← median của validRawBuffer, KHÔNG phải cleanBuffer
         result.source = DataSource::FALLBACK_MEDIAN;
         result.status = FieldStatus::MAD_OUTLIER;
-
-        fallbackCount = (fallbackCount < 255) ? fallbackCount + 1 : 255;
         result.fallback_count = fallbackCount;
 
         LOG_DEBUG("PIPELINE", "MAD outlier: raw=%.3f z=%.3f > %.3f → fallback median=%.3f",

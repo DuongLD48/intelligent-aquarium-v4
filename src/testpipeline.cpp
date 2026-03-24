@@ -302,6 +302,130 @@ void testSuite5_StaleSensor() {
 }
 
 // ================================================================
+// SUITE 7 — TEMPERATURE MAD LOCK & RECOVERY
+// Cover các kịch bản: nhúng nước đá, rút ra, nhiễu DS18B20
+// ================================================================
+void testSuite7_TempMadLock() {
+    TEST_SUITE("7: Temp MAD Lock & Recovery");
+
+    // 7.1 Nhúng nước đá (29→25°C đột ngột): 9 lần đầu fallback, lần 10 force accept
+    {
+        DataPipeline p;
+        feedPipeline(p, 29.0f, 7.0f, 300.0f, 15);  // Buffer đầy ~29°C
+
+        int fallbackCount = 0;
+        int measuredCount = 0;
+        CleanReading last;
+        for (int i = 0; i < 10; i++) {
+            last = p.process(makeReading(25.0f, 7.0f, 300.0f));
+            if (last.source_temperature == DataSource::FALLBACK_MEDIAN) fallbackCount++;
+            if (last.source_temperature == DataSource::MEASURED)        measuredCount++;
+        }
+        // 9 lần đầu phải fallback
+        EXPECT_EQ("Ice bath: 9 fallbacks before force accept", fallbackCount, 9);
+        // Lần thứ 10 phải force accept
+        EXPECT_SOURCE("Ice bath: lần 10 force accept → MEASURED",
+                      last.source_temperature, DataSource::MEASURED);
+        EXPECT_NEAR("Ice bath: force accept = 25.0°C", last.temperature, 25.0f, 0.1f);
+    }
+
+    // 7.2 Sau force accept, buffer kept → median dần dịch về giá trị mới
+    // Không lock ngược chiều: các mẫu 25°C tiếp tục dần được accept
+    {
+        DataPipeline p;
+        feedPipeline(p, 29.0f, 7.0f, 300.0f, 15);
+
+        // Trigger force accept tại lần 10
+        for (int i = 0; i < 10; i++) p.process(makeReading(25.0f, 7.0f, 300.0f));
+
+        // Sau force accept: buffer chứa hỗn hợp 29°C và 25°C
+        // → median dần dịch về 25°C → các mẫu 25°C ngày càng dễ pass
+        // Feed thêm 20 mẫu 25°C: ít nhất nửa sau phải là MEASURED
+        int measured = 0;
+        for (int i = 0; i < 20; i++) {
+            auto r = p.process(makeReading(25.0f + (float)(i % 3) * 0.05f, 7.0f, 300.0f));
+            if (r.source_temperature == DataSource::MEASURED) measured++;
+        }
+        EXPECT_TRUE("After force accept: buffer converges, >= 10/20 MEASURED", measured >= 10);
+        Serial.printf("    Post-recovery convergence: %d/20 MEASURED\n", measured);
+    }
+
+    // 7.3 Rút ra khỏi nước đá (25→29°C): phải lock lại 9 lần rồi force accept
+    {
+        DataPipeline p;
+        feedPipeline(p, 29.0f, 7.0f, 300.0f, 15);
+        // Trigger force accept về 25°C
+        for (int i = 0; i < 10; i++) p.process(makeReading(25.0f, 7.0f, 300.0f));
+        // Thêm mẫu ổn định ở 25°C để buffer đầy
+        feedPipeline(p, 25.0f, 7.0f, 300.0f, 20);
+
+        // Rút ra: lên lại 29°C
+        int fallbacks = 0;
+        CleanReading last;
+        for (int i = 0; i < 10; i++) {
+            last = p.process(makeReading(29.0f, 7.0f, 300.0f));
+            if (last.source_temperature == DataSource::FALLBACK_MEDIAN) fallbacks++;
+        }
+        EXPECT_EQ("Pull out ice: 9 fallbacks then force accept", fallbacks, 9);
+        EXPECT_SOURCE("Pull out ice: lần 10 = MEASURED",
+                      last.source_temperature, DataSource::MEASURED);
+        EXPECT_NEAR("Pull out ice: value = 29.0", last.temperature, 29.0f, 0.1f);
+    }
+
+    // 7.4 Spike ngắn 1 mẫu KHÔNG trigger force accept (fallback reset về 0)
+    {
+        DataPipeline p;
+        feedPipeline(p, 29.0f, 7.0f, 300.0f, 15);
+
+        // Spike 1 mẫu
+        auto rSpike = p.process(makeReading(45.0f, 7.0f, 300.0f));
+        EXPECT_SOURCE("Single spike → FALLBACK_MEDIAN", rSpike.source_temperature,
+                      DataSource::FALLBACK_MEDIAN);
+        EXPECT_EQ("Single spike: fallback_count = 1", rSpike.fallback_count_temp, 1);
+
+        // Về bình thường → fallback_count phải reset
+        auto rOk = p.process(makeReading(29.0f, 7.0f, 300.0f));
+        EXPECT_SOURCE("After spike: normal → MEASURED", rOk.source_temperature,
+                      DataSource::MEASURED);
+        EXPECT_EQ("After spike: fallback_count reset = 0", rOk.fallback_count_temp, 0);
+    }
+
+    // 7.5 DS18B20 read failed liên tiếp (NaN) → FALLBACK_LAST, KHÔNG trigger force accept
+    // (Range gate xử lý NaN trước MAD, fallback_count tăng riêng nhưng
+    //  sau 10 lần thì safety SENSOR_STALE kick in chứ KHÔNG force accept giá trị NaN)
+    {
+        DataPipeline p;
+        feedPipeline(p, 29.0f, 7.0f, 300.0f, 15);
+
+        CleanReading last;
+        for (int i = 0; i < 12; i++) {
+            last = p.process(makeReading(NAN, 7.0f, 300.0f));
+        }
+        // NaN phải luôn FALLBACK_LAST (không bao giờ force accept NaN)
+        EXPECT_SOURCE("12x NaN → still FALLBACK_LAST (not force accept)",
+                      last.source_temperature, DataSource::FALLBACK_LAST);
+        EXPECT_NEAR("12x NaN → fallback = last good 29.0", last.temperature, 29.0f, 0.1f);
+        EXPECT_EQ("12x NaN: fallback_count = 12", last.fallback_count_temp, 12);
+    }
+
+    // 7.6 Trend giảm chậm (nước lạnh từ từ) → KHÔNG lock, MỌI mẫu MEASURED
+    {
+        DataPipeline p;
+        feedPipeline(p, 29.0f, 7.0f, 300.0f, 15);
+
+        int measured = 0;
+        float val = 29.0f;
+        for (int i = 0; i < 20; i++) {
+            val -= 0.15f;  // -0.15°C/chu kỳ: 29→26°C trong 20 bước
+            auto r = p.process(makeReading(val, 7.0f, 300.0f));
+            if (r.source_temperature == DataSource::MEASURED) measured++;
+        }
+        EXPECT_TRUE("Slow cooling 29→26: all 20 MEASURED", measured == 20);
+        Serial.printf("    Slow cooling: %d/20 MEASURED\n", measured);
+    }
+}
+
+// ================================================================
 // SUITE 6 — REGRESSION TESTS
 // ================================================================
 void testSuite6_Regression() {

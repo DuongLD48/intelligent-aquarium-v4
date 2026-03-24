@@ -85,7 +85,7 @@
 // PH CALIBRATION
 // ----------------------------------------------------------------
 #define PH_CALIB_SLOPE    (-3.5f)
-#define PH_CALIB_OFFSET   (14.35f)
+#define PH_CALIB_OFFSET   (15.5f)
 
 // ----------------------------------------------------------------
 // TDS CALIBRATION

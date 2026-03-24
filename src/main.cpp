@@ -220,8 +220,8 @@ void setup() {
     // Áp dụng pipeline config từ NVS vào dataPipeline
     dataPipeline.setConfig(configManager.getPipelineConfig());
 
-    safetyCore.setBypass(true);  // test
-    // safetyCore.setBypass(false); // production  
+    // safetyCore.setBypass(true);  // test
+    safetyCore.setBypass(false); // production  
     
     // systemManager.setSafeModeBypass(true);  // test
     systemManager.setSafeModeBypass(false); // production

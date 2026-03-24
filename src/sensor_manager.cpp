@@ -176,6 +176,7 @@ bool readSensors() {
     }
 
     float ph  = _readPh();
+    delay(20); 
     float tds = _readTds(isnan(temp) ? _lastRawTemp : temp);
 
     SensorReading reading;
