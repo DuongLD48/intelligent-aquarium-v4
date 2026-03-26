@@ -45,6 +45,7 @@ DataPipeline dataPipeline;
 static CleanReading    gClean;
 static AnalyticsResult gAnalytics;
 static bool            gWifiConnected = false;
+static SafetyEvent     gPrevSafetyEvt = SafetyEvent::NONE;  // rising edge guard
 
 // ----------------------------------------------------------------
 // PH PULSE TIMER — non-blocking
@@ -355,9 +356,14 @@ step_firebase:
     // ── BƯỚC 16: Safety check (7 tầng tuần tự) ──────────────────
     SafetyEvent evt = safetyCore.apply(cmd, clean);
 
-    // Push safety event lên Firebase nếu có
+    // Push safety event lên Firebase chỉ khi có event MỚI thực sự.
+    // Không update gPrevSafetyEvt khi evt=NONE — giữ nguyên event cũ
+    // để tránh gửi lại cùng 1 event sau khi có 1 chu kỳ NONE xen giữa.
     if (evt != SafetyEvent::NONE) {
-        firebaseClient.pushSafetyEvent(evt);
+        if (evt != gPrevSafetyEvt) {
+            firebaseClient.pushSafetyEvent(evt);
+        }
+        gPrevSafetyEvt = evt;
     }
 
     // ── BƯỚC 17: Ghi relay GPIO ──────────────────────────────────

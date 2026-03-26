@@ -64,6 +64,11 @@ struct CleanReading {
     bool shock_temperature;
     bool shock_ph;
 
+    // Giá trị trước shock — chỉ valid khi shock_* = true
+    // Được gán bởi DataPipeline tại thời điểm phát hiện shock
+    float shock_temp_before;  // °C trước khi shock
+    float shock_ph_before;    // pH trước khi shock
+
     // Số chu kỳ liên tiếp dùng fallback
     uint8_t fallback_count_temp;
     uint8_t fallback_count_ph;

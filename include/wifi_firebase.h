@@ -24,14 +24,18 @@
 //
 // ── SCHEMA ──────────────────────────────────────────────────────
 //  /devices/{DEVICE_ID}/
-//    telemetry/         <- ESP32 ghi 10s
-//    analytics/         <- ESP32 ghi 10s
-//    relay_state/       <- ESP32 ghi 10s
-//    status/            <- ESP32 ghi 10s
-//    water_change/      <- ESP32 ghi state/last_run/trigger_source
-//                         Web ghi manual_trigger=true
-//    settings/          <- Web ghi, ESP32 stream
-//    history/{ts}       <- ESP32 ghi 60s {temp, ph, tds}
+//    telemetry/                  <- ESP32 ghi 10s
+//    analytics/                  <- ESP32 ghi 10s
+//    relay_state/                <- ESP32 ghi 10s
+//    status/                     <- ESP32 ghi 10s (bỏ last_safety_event)
+//    water_change/               <- ESP32 ghi state/last_run/trigger_source
+//                                   Web ghi manual_trigger=true
+//    settings/                   <- Web ghi, ESP32 stream
+//    history/
+//      chart/{ts}                <- ESP32 ghi 60s {temp, ph, tds}
+//      shock_event_ph/{ts}       <- khi shock pH  {ph_before, ph_after, is_read}
+//      shock_event_temp/{ts}     <- khi shock temp {temp_before, temp_after, is_read}
+//      last_safety_event/{ts}    <- khi safety event {event, is_read}
 //
 // ── 2 STREAMS ───────────────────────────────────────────────────
 //  Stream1: /settings        -> parse 5 config groups
@@ -107,16 +111,21 @@ private:
     uint32_t _lastUploadMs;
     uint32_t _lastHistoryMs;
 
+    // Rising edge tracking — chỉ gửi shock event khi false → true
+    bool _prevShockPh;
+    bool _prevShockTemp;
+
     void _uploadAll(
         const CleanReading& c, const AnalyticsResult& a,
         const RelayCommand& r, SafetyEvent lastEvt, bool safeMode);
 
-    void _uploadHistory(const CleanReading& c);
+    void _uploadHistory     (const CleanReading& c);
+    void _uploadShockEvents (const CleanReading& c);  // ghi shock_event_ph/temp khi có shock
 
     String _buildTelemetryJson  (const CleanReading&    c);
     String _buildAnalyticsJson  (const AnalyticsResult& a);
     String _buildRelayJson      (const RelayCommand&    cmd);
-    String _buildStatusJson     (SafetyEvent e, bool safeMode);
+    String _buildStatusJson     (bool safeMode);
 
     void _startSettingsStream();
     void _startTriggerStream();

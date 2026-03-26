@@ -234,9 +234,11 @@ CleanReading DataPipeline::process(const SensorReading& raw) {
     CleanReading out;
     out.timestamp = raw.timestamp;
 
-    // Reset shock flags
+    // Reset shock flags + before values
     out.shock_temperature = false;
     out.shock_ph          = false;
+    out.shock_temp_before = 0.0f;
+    out.shock_ph_before   = 0.0f;
 
     // ---- Xử lý Temperature ----
     FieldResult rTemp = _processField(
@@ -291,6 +293,7 @@ CleanReading DataPipeline::process(const SensorReading& raw) {
         float delta = fabsf(out.temperature - _prevCleanTemp);
         if (delta > _cfg.shock_temp_delta) {
             out.shock_temperature = true;
+            out.shock_temp_before = _prevCleanTemp;  // giá trị trước shock
             LOG_WARNING("PIPELINE", "Shock TEMP: %.2f → %.2f (delta=%.2f)",
                         _prevCleanTemp, out.temperature, delta);
         }
@@ -305,6 +308,7 @@ CleanReading DataPipeline::process(const SensorReading& raw) {
         float delta = fabsf(out.ph - _prevCleanPh);
         if (delta > _cfg.shock_ph_delta) {
             out.shock_ph = true;
+            out.shock_ph_before = _prevCleanPh;  // giá trị trước shock
             LOG_WARNING("PIPELINE", "Shock pH: %.3f → %.3f (delta=%.3f)",
                         _prevCleanPh, out.ph, delta);
         }

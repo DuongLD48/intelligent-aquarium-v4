@@ -150,7 +150,8 @@ void WiFiManager::_connect()          { WiFi.begin(_ssid, _password); }
 
 AquaFirebaseClient::AquaFirebaseClient()
     : _ready(false), _lastUploadMs(0), _lastHistoryMs(0),
-      _lastSettingsStreamMs(0), _lastTriggerStreamMs(0) {}
+      _lastSettingsStreamMs(0), _lastTriggerStreamMs(0),
+      _prevShockPh(false), _prevShockTemp(false) {}
 
 // ================================================================
 // RESTART — reset Firebase state sạch, dùng lại SSL objects đã có
@@ -247,6 +248,9 @@ void AquaFirebaseClient::loop(
         _uploadHistory(clean);
     }
 
+    // Ghi shock events ngay khi phát hiện (mỗi cycle, hàm tự guard)
+    _uploadShockEvents(clean);
+
     _checkStreamHealth();
 }
 
@@ -265,7 +269,7 @@ void AquaFirebaseClient::_uploadAll(
     Database.set<object_t>(aClient, DB_PATH("relay_state"),
         object_t(_buildRelayJson(r).c_str()),                  onUploadResult, "upRly");
     Database.set<object_t>(aClient, DB_PATH("status"),
-        object_t(_buildStatusJson(lastEvt, safeMode).c_str()), onUploadResult, "upSta");
+        object_t(_buildStatusJson(safeMode).c_str()), onUploadResult, "upSta");
 
     // water_change: set từng field riêng để không đụng manual_trigger của Web
     Database.set<String>  (aClient, DB_PATH("water_change/state"),
@@ -336,30 +340,29 @@ String AquaFirebaseClient::_buildRelayJson(const RelayCommand& cmd) {
     return String(b);
 }
 
-String AquaFirebaseClient::_buildStatusJson(SafetyEvent e, bool safeMode) {
-    char b[192];
+String AquaFirebaseClient::_buildStatusJson(bool safeMode) {
+    char b[160];
     snprintf(b, sizeof(b),
         "{\"uptime_s\":%lu,\"wifi_rssi\":%d,\"free_heap\":%lu"
-        ",\"safe_mode\":%s,\"last_safety_event\":\"%s\"}",
+        ",\"safe_mode\":%s}",
         (unsigned long)(millis() / 1000UL),
         wifiManager.rssi(),
         (unsigned long)ESP.getFreeHeap(),
-        safeMode ? "true" : "false",
-        _safetyEventStr(e));
+        safeMode ? "true" : "false");
     return String(b);
 }
 
 // ================================================================
-// UPLOAD HISTORY — ghi 1 record vào RTDB mỗi 60s
-// Path: /devices/{id}/history/{unix_timestamp}
+// UPLOAD HISTORY CHART — ghi 1 record vào RTDB mỗi 60s
+// Path: /devices/{id}/history/chart/{unix_timestamp}
 // Key là Unix timestamp (giây) → sort tự nhiên theo thời gian
 // ================================================================
 void AquaFirebaseClient::_uploadHistory(const CleanReading& c) {
     time_t now = time(nullptr);
     if (now < 1700000000L) return;  // NTP chưa sync → bỏ qua
 
-    char path[64];
-    snprintf(path, sizeof(path), DB_ROOT "/history/%ld", (long)now);
+    char path[72];
+    snprintf(path, sizeof(path), DB_ROOT "/history/chart/%ld", (long)now);
 
     char body[80];
     snprintf(body, sizeof(body),
@@ -369,18 +372,90 @@ void AquaFirebaseClient::_uploadHistory(const CleanReading& c) {
     Database.set<object_t>(aClient, path,
         object_t(body), onUploadResult, "upHist");
 
-    LOG_DEBUG("FB", "History: ts=%ld T=%.2f pH=%.3f TDS=%.1f",
+    LOG_DEBUG("FB", "History/chart: ts=%ld T=%.2f pH=%.3f TDS=%.1f",
               (long)now, c.temperature, c.ph, c.tds);
 }
 
+// ================================================================
+// UPLOAD SHOCK EVENTS — chỉ gửi khi rising edge (false → true)
+// Tránh gửi liên tục khi shock_flag kéo dài nhiều chu kỳ
+//
+// history/shock_event_ph/{ts}   → { ph_before, ph_after, is_read: false }
+// history/shock_event_temp/{ts} → { temp_before, temp_after, is_read: false }
+// ================================================================
+void AquaFirebaseClient::_uploadShockEvents(const CleanReading& c) {
+    if (!_ready || !wifiManager.isConnected()) return;
 
+    time_t now = time(nullptr);
+    if (now < 1700000000L) return;  // NTP chưa sync → bỏ qua
+
+    // Rising edge shock_ph: false → true
+    if (c.shock_ph && !_prevShockPh) {
+        char path[80];
+        snprintf(path, sizeof(path),
+            DB_ROOT "/history/shock_event_ph/%ld", (long)now);
+
+        char body[96];
+        snprintf(body, sizeof(body),
+            "{\"ph_before\":%.3f,\"ph_after\":%.3f,\"is_read\":false}",
+            c.shock_ph_before, c.ph);
+
+        Database.set<object_t>(aClient, path,
+            object_t(body), onUploadResult, "upShkPh");
+
+        LOG_WARNING("FB", "ShockEvent pH: %.3f → %.3f ts=%ld",
+                    c.shock_ph_before, c.ph, (long)now);
+    }
+
+    // Rising edge shock_temperature: false → true
+    if (c.shock_temperature && !_prevShockTemp) {
+        char path[80];
+        snprintf(path, sizeof(path),
+            DB_ROOT "/history/shock_event_temp/%ld", (long)now);
+
+        char body[96];
+        snprintf(body, sizeof(body),
+            "{\"temp_before\":%.2f,\"temp_after\":%.2f,\"is_read\":false}",
+            c.shock_temp_before, c.temperature);
+
+        Database.set<object_t>(aClient, path,
+            object_t(body), onUploadResult, "upShkTmp");
+
+        LOG_WARNING("FB", "ShockEvent TEMP: %.2f → %.2f ts=%ld",
+                    c.shock_temp_before, c.temperature, (long)now);
+    }
+
+    // Cập nhật trạng thái trước cho chu kỳ tiếp theo
+    _prevShockPh   = c.shock_ph;
+    _prevShockTemp = c.shock_temperature;
+}
+
+
+// ================================================================
+// PUSH SAFETY EVENT — ghi vào history/last_safety_event/{ts}
+// Dùng timestamp làm key → log nhiều event, sort theo thời gian
+// is_read: false mặc định — Web/App đánh dấu đã xem
+// ================================================================
 void AquaFirebaseClient::pushSafetyEvent(SafetyEvent evt) {
     if (!_ready || !wifiManager.isConnected()) return;
-    Database.set<String>(aClient,
-        DB_PATH("status/last_safety_event"),
-        String(_safetyEventStr(evt)),
-        onUploadResult, "pushEvt");
-    LOG_INFO("FB", "SafetyEvent: %s", _safetyEventStr(evt));
+
+    time_t now = time(nullptr);
+    if (now < 1700000000L) return;  // NTP chưa sync → bỏ qua
+
+    char path[80];
+    snprintf(path, sizeof(path),
+        DB_ROOT "/history/last_safety_event/%ld", (long)now);
+
+    char body[80];
+    snprintf(body, sizeof(body),
+        "{\"event\":\"%s\",\"is_read\":false}",
+        _safetyEventStr(evt));
+
+    Database.set<object_t>(aClient, path,
+        object_t(body), onUploadResult, "pushEvt");
+
+    LOG_INFO("FB", "SafetyEvent → history: %s ts=%ld",
+             _safetyEventStr(evt), (long)now);
 }
 
 // ================================================================
