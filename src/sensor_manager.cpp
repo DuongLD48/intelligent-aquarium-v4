@@ -48,6 +48,14 @@ static bool          _initialized    = false;
 static constexpr unsigned long DS18B20_CONVERSION_MS = 800UL; // 50ms margin
 
 // ----------------------------------------------------------------
+// Calibration runtime — mặc định từ system_constants.h,
+// được ghi đè bởi sensorManagerSetCalibration() khi Firebase update
+// ----------------------------------------------------------------
+static float _phSlope   = PH_CALIB_SLOPE_DEFAULT;
+static float _phOffset  = PH_CALIB_OFFSET_DEFAULT;
+static float _tdsFactor = TDS_CALIB_FACTOR_DEFAULT;
+
+// ----------------------------------------------------------------
 // Helpers — chuyển đổi ADC → giá trị vật lý
 // ----------------------------------------------------------------
 
@@ -59,7 +67,7 @@ static inline float _adcToVoltage(int raw) {
 // Voltage → pH dùng calibration slope + offset
 // pH = slope × voltage + offset
 static float _voltageToPh(float voltage) {
-    return PH_CALIB_SLOPE * voltage + PH_CALIB_OFFSET;
+    return _phSlope * voltage + _phOffset;
 }
 
 // Voltage → TDS (ppm) với bù nhiệt độ
@@ -78,7 +86,7 @@ static float _voltageToTds(float voltage, float tempC) {
     float compensation = 1.0f + 0.02f * (temp - TDS_TEMP_REF_C);
     if (compensation < 0.01f) compensation = 0.01f;  // Tránh chia 0
 
-    return (tdsRaw / compensation) * TDS_CALIB_FACTOR;
+    return (tdsRaw / compensation) * _tdsFactor;
 }
 
 // ----------------------------------------------------------------
@@ -196,4 +204,21 @@ bool readSensors() {
 // ----------------------------------------------------------------
 bool isSensorDataReady() {
     return !rawSensorBuffer.isEmpty();
+}
+
+// ----------------------------------------------------------------
+// Cập nhật calibration runtime — gọi từ ConfigManager khi Firebase
+// gửi settings/calibration mới. Có hiệu lực ngay chu kỳ đọc tiếp.
+// ----------------------------------------------------------------
+void sensorManagerSetCalibration(float phSlope, float phOffset, float tdsFactor) {
+    if (phSlope == 0.0f || tdsFactor <= 0.0f) {
+        LOG_ERROR("SENSOR", "setCalibration rejected: slope=%.4f factor=%.4f",
+                  phSlope, tdsFactor);
+        return;
+    }
+    _phSlope   = phSlope;
+    _phOffset  = phOffset;
+    _tdsFactor = tdsFactor;
+    LOG_INFO("SENSOR", "Calibration updated: ph_slope=%.4f ph_offset=%.4f tds_factor=%.4f",
+             _phSlope, _phOffset, _tdsFactor);
 }

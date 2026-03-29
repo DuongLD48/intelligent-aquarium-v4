@@ -187,9 +187,10 @@ DataPipeline::FieldResult DataPipeline::_processField(
         fallbackCount = (fallbackCount < 255) ? fallbackCount + 1 : 255;
 
         // MAD lock detection: fallback quá lâu → thực tế đã thay đổi thật sự
-        // Push raw vào buffer (KHÔNG clear) để median dịch chuyển dần,
-        // tránh tạo lock ngược chiều sau khi force accept
+        // Clear toàn bộ buffer cũ rồi push raw mới → median reset về giá trị thực
+        // (giữ buffer cũ là bug: median vẫn ~30.7 nên chu kỳ tiếp lại bị reject)
         if (fallbackCount >= _cfg.mad_min_samples) {
+            validBuf.clear();
             validBuf.push(raw);
             result.value  = raw;
             result.source = DataSource::MEASURED;
@@ -198,7 +199,8 @@ DataPipeline::FieldResult DataPipeline::_processField(
             result.fallback_count = 0;
             lastGood    = raw;
             hasLastGood = true;
-            LOG_WARNING("PIPELINE", "MAD lock → force accept %.3f, buffer kept", raw);
+            LOG_WARNING("PIPELINE", "MAD lock → force accept %.3f, buffer CLEARED (was median=%.3f)",
+                        raw, med);
             return result;
         }
 

@@ -202,6 +202,14 @@ static void debugPrintCycle(const CleanReading& c,
         (int)wc.schedule_hour, (int)wc.schedule_minute,
         (int)wc.pump_out_sec,  (int)wc.pump_in_sec
     );
+
+    // ── SensorCalibration ──────────────────────────────────────────
+    const SensorCalibration& calib = configManager.getCalibration();
+    LOG_DEBUG("CALIB",
+        "pH: slope=%.4f offset=%.4f | TDS: factor=%.4f",
+        calib.ph_slope, calib.ph_offset, calib.tds_factor
+    );
+
     LOG_DEBUG("END DEBUG", "------------------------------------------------------------");
 }
 

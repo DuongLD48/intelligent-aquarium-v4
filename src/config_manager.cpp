@@ -4,6 +4,7 @@
 #include "pid_controller.h"
 #include "data_pipeline.h"
 #include "water_change_manager.h"
+#include "sensor_manager.h"
 #include <Preferences.h>
 #include <string.h>
 #include <stdlib.h>
@@ -100,11 +101,16 @@ void ConfigManager::begin() {
     bool ctrlOk  = loadControlConfig(_ctrl);
     bool pipeOk  = loadPipelineConfig(_pipe);
     bool waterOk = loadWaterSchedule(_water);
+    bool calibOk = loadCalibration(_calib);
 
-    LOG_INFO("CFG", "begin: ctrl=%s pipe=%s water=%s",
-             ctrlOk ? "NVS" : "default",
-             pipeOk ? "NVS" : "default",
-             waterOk ? "NVS" : "default");
+    LOG_INFO("CFG", "begin: ctrl=%s pipe=%s water=%s calib=%s",
+             ctrlOk  ? "NVS" : "default",
+             pipeOk  ? "NVS" : "default",
+             waterOk ? "NVS" : "default",
+             calibOk ? "NVS" : "default");
+
+    // Propagate calibration ngay sau load
+    sensorManagerSetCalibration(_calib.ph_slope, _calib.ph_offset, _calib.tds_factor);
 }
 
 // ================================================================
@@ -300,8 +306,48 @@ bool ConfigManager::saveWaterSchedule(const WaterChangeSchedule& sched) {
 }
 
 // ================================================================
-// JSON PARSERS
+// NVS — SENSOR CALIBRATION
 // ================================================================
+bool ConfigManager::loadCalibration(SensorCalibration& out) {
+    Preferences prefs;
+    if (!prefs.begin(NVS_NAMESPACE_CALIB, true)) return false;
+    if (!prefs.isKey("saved")) { prefs.end(); return false; }
+
+    out.ph_slope   = prefs.getFloat("ph_slope",   out.ph_slope);
+    out.ph_offset  = prefs.getFloat("ph_offset",  out.ph_offset);
+    out.tds_factor = prefs.getFloat("tds_factor", out.tds_factor);
+    prefs.end();
+
+    if (!out.isValid()) {
+        LOG_WARNING("CFG", "NVS calib invalid → default");
+        out = SensorCalibration{};
+        return false;
+    }
+
+    LOG_INFO("CFG", "Calibration loaded: ph_slope=%.4f ph_offset=%.4f tds_factor=%.4f",
+             out.ph_slope, out.ph_offset, out.tds_factor);
+    return true;
+}
+
+bool ConfigManager::saveCalibration(const SensorCalibration& calib) {
+    if (!calib.isValid()) {
+        LOG_ERROR("CFG", "saveCalibration: invalid (slope=0 or factor<=0)");
+        return false;
+    }
+
+    Preferences prefs;
+    if (!prefs.begin(NVS_NAMESPACE_CALIB, false)) return false;
+
+    prefs.putFloat("ph_slope",   calib.ph_slope);
+    prefs.putFloat("ph_offset",  calib.ph_offset);
+    prefs.putFloat("tds_factor", calib.tds_factor);
+    prefs.putBool("saved",       true);
+    prefs.end();
+
+    LOG_INFO("CFG", "Calibration saved: ph_slope=%.4f ph_offset=%.4f tds_factor=%.4f",
+             calib.ph_slope, calib.ph_offset, calib.tds_factor);
+    return true;
+}
 bool ConfigManager::parseControlConfigJson(const char* json, ControlConfig& out) {
     ControlConfig tmp = out;  // Bắt đầu từ giá trị hiện tại
 
@@ -385,6 +431,24 @@ bool ConfigManager::parseWaterScheduleJson(const char* json, WaterChangeSchedule
     if (_parseInt(json, "pump_in_sec",  iVal) &&
         iVal >= tmp.pump_min_sec && iVal <= tmp.pump_in_max_sec)
         tmp.pump_in_sec = (uint16_t)iVal;
+
+    out = tmp;
+    return true;
+}
+
+bool ConfigManager::parseCalibrationJson(const char* json, SensorCalibration& out) {
+    SensorCalibration tmp = out;
+    float fVal;
+
+    if (_parseFloat(json, "ph_slope",   fVal) && fVal != 0.0f) tmp.ph_slope   = fVal;
+    if (_parseFloat(json, "ph_offset",  fVal))                  tmp.ph_offset  = fVal;
+    if (_parseFloat(json, "tds_factor", fVal) && fVal > 0.0f)  tmp.tds_factor = fVal;
+
+    if (!tmp.isValid()) {
+        LOG_ERROR("CFG", "parseCalibrationJson: invalid (slope=%.4f factor=%.4f)",
+                  tmp.ph_slope, tmp.tds_factor);
+        return false;
+    }
 
     out = tmp;
     return true;
@@ -475,6 +539,23 @@ bool ConfigManager::applyWaterSchedule(const WaterChangeSchedule& sched) {
              sched.enabled ? "ON" : "OFF",
              sched.hour, sched.minute,
              sched.pump_out_sec, sched.pump_in_sec);
+    return true;
+}
+
+bool ConfigManager::applyCalibration(const SensorCalibration& calib) {
+    if (!calib.isValid()) {
+        LOG_ERROR("CFG", "applyCalibration rejected: slope=%.4f factor=%.4f",
+                  calib.ph_slope, calib.tds_factor);
+        return false;
+    }
+    _calib = calib;
+    saveCalibration(calib);
+
+    // Propagate ngay đến sensor_manager — có hiệu lực ngay chu kỳ đọc tiếp theo
+    sensorManagerSetCalibration(calib.ph_slope, calib.ph_offset, calib.tds_factor);
+
+    LOG_INFO("CFG", "Calibration applied: ph_slope=%.4f ph_offset=%.4f tds_factor=%.4f",
+             calib.ph_slope, calib.ph_offset, calib.tds_factor);
     return true;
 }
 

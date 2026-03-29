@@ -599,6 +599,14 @@ void AquaFirebaseClient::_onSettingsPayload(const char* path, const char* data) 
             } else {
                 LOG_WARNING("FB", "Stream: water_schedule parse failed");
             }
+        } else if (strcmp(groupName, "calibration") == 0) {
+            SensorCalibration calib = configManager.getCalibration();
+            if (configManager.parseCalibrationJson(groupJson, calib)) {
+                configManager.applyCalibration(calib);
+                LOG_INFO("FB", "Stream: calibration applied");
+            } else {
+                LOG_WARNING("FB", "Stream: calibration parse failed json=%s", groupJson);
+            }
         }
     };
 
@@ -612,7 +620,7 @@ void AquaFirebaseClient::_onSettingsPayload(const char* path, const char* data) 
         };
         const char* groups[] = {
             "config", "pipeline_config", "analytics_config",
-            "safety_limits", "water_schedule"
+            "safety_limits", "water_schedule", "calibration"
         };
         for (const char* g : groups) {
             char sk[32];

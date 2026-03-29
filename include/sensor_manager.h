@@ -32,3 +32,7 @@ bool readSensors();
 
 // Kiểm tra xem rawSensorBuffer có ít nhất 1 mẫu chưa
 bool isSensorDataReady();
+
+// Cập nhật hệ số calibration runtime (gọi từ ConfigManager).
+// Có hiệu lực ngay chu kỳ đọc tiếp theo.
+void sensorManagerSetCalibration(float phSlope, float phOffset, float tdsFactor);

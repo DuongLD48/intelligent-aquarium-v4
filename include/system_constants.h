@@ -82,15 +82,13 @@
 #define WATER_CHANGE_MAX_PUMP_IN_SEC        600   // Default: tối đa 10 phút bơm vào
 
 // ----------------------------------------------------------------
-// PH CALIBRATION
+// PH / TDS CALIBRATION — giá trị mặc định khi NVS chưa có data.
+// Giá trị runtime được ghi đè bởi Firebase → NVS qua ConfigManager.
+// Không nên sửa trực tiếp ở đây — dùng trang Admin trên web.
 // ----------------------------------------------------------------
-#define PH_CALIB_SLOPE    (-3.5f)
-#define PH_CALIB_OFFSET   (15.5f)
-
-// ----------------------------------------------------------------
-// TDS CALIBRATION
-// ----------------------------------------------------------------
-#define TDS_CALIB_FACTOR  (1.0f)
+#define PH_CALIB_SLOPE_DEFAULT    (-3.5f)
+#define PH_CALIB_OFFSET_DEFAULT   (15.5f)
+#define TDS_CALIB_FACTOR_DEFAULT  (1.0f)
 
 // ----------------------------------------------------------------
 // NTP / TIME
