@@ -116,6 +116,11 @@ class SafetyCore {
     // Trả về SafetyEvent đầu tiên bị kích hoạt (hoặc NONE)
     SafetyEvent apply(RelayCommand& cmd, const CleanReading& clean);
 
+    // Gọi từ PhSessionManager trước khi bật pH pump.
+    // Check ph_pump_min_interval — trả true nếu được phép, false nếu bị block.
+    // Nếu được phép → cập nhật _lastPhPumpOnTime ngay.
+    bool checkPhPumpAllowed();
+
     // Ghi RelayCommand vào GPIO vật lý
     // Relay active LOW: BẬT = digitalWrite LOW, TẮT = HIGH
     void writeRelays(const RelayCommand& cmd);

@@ -35,8 +35,8 @@ enum class FieldStatus : uint8_t {
 struct SensorReading {
     uint32_t timestamp;   // millis() lúc đọc
     float temperature;    // °C
-    float ph;             // đơn vị pH
     float tds;            // ppm
+    // pH không đọc trong loop bình thường — chỉ qua PhSessionManager
 };
 
 // ----------------------------------------------------------------
@@ -46,32 +46,26 @@ struct CleanReading {
     uint32_t timestamp;
 
     // Giá trị đã lọc (hoặc fallback)
+    // pH không còn ở đây — pH đo riêng qua PhSessionManager
     float temperature;
-    float ph;
     float tds;
 
     // Nguồn gốc từng field
     DataSource source_temperature;
-    DataSource source_ph;
     DataSource source_tds;
 
     // Trạng thái từng field
     FieldStatus status_temperature;
-    FieldStatus status_ph;
     FieldStatus status_tds;
 
-    // Shock flags (chỉ cảnh báo, không reject)
+    // Shock flag nhiệt độ (chỉ cảnh báo, không reject)
     bool shock_temperature;
-    bool shock_ph;
 
-    // Giá trị trước shock — chỉ valid khi shock_* = true
-    // Được gán bởi DataPipeline tại thời điểm phát hiện shock
+    // Giá trị trước shock — chỉ valid khi shock_temperature = true
     float shock_temp_before;  // °C trước khi shock
-    float shock_ph_before;    // pH trước khi shock
 
     // Số chu kỳ liên tiếp dùng fallback
     uint8_t fallback_count_temp;
-    uint8_t fallback_count_ph;
     uint8_t fallback_count_tds;
 
     // ---- Helpers ----
@@ -79,25 +73,18 @@ struct CleanReading {
     // Tất cả field đều MEASURED (không có fallback nào)
     bool is_fully_clean() const {
         return (source_temperature == DataSource::MEASURED)
-            && (source_ph         == DataSource::MEASURED)
             && (source_tds        == DataSource::MEASURED);
     }
 
     // Có bất kỳ shock flag nào
     bool has_shock() const {
-        return shock_temperature || shock_ph;
+        return shock_temperature;
     }
 
     // Temperature hợp lệ (không phải fallback default)
     bool temp_valid() const {
         return status_temperature != FieldStatus::SENSOR_ERROR
             && source_temperature != DataSource::FALLBACK_DEFAULT;
-    }
-
-    // pH hợp lệ
-    bool ph_valid() const {
-        return status_ph != FieldStatus::SENSOR_ERROR
-            && source_ph != DataSource::FALLBACK_DEFAULT;
     }
 
     // TDS hợp lệ

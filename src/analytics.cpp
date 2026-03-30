@@ -18,7 +18,7 @@ Analytics analytics;
 
 // ----------------------------------------------------------------
 Analytics::Analytics()
-    : _prevTemp(25.0f), _prevPh(7.0f),
+    : _prevTemp(25.0f),
       _hasPrev(false), _shockCount(0)
 {}
 
@@ -26,7 +26,6 @@ Analytics::Analytics()
 void Analytics::reset() {
     _ema          = EmaState{};
     _cusumTemp    = CusumState{};
-    _cusumPh      = CusumState{};
     _cusumTds     = CusumState{};
     _result       = AnalyticsResult{};
     _hasPrev      = false;
@@ -55,13 +54,11 @@ void Analytics::update(const CircularBuffer<CleanReading, SENSOR_HISTORY_SIZE>& 
 
     // Copy EMA vào result
     _result.ema_temp = _ema.temp;
-    _result.ema_ph   = _ema.ph;
     _result.ema_tds  = _ema.tds;
 
-    LOG_VERBOSE("ANALYTICS", "WSI=%.1f FSI=%.2f drift=[%d,%d,%d]",
+    LOG_VERBOSE("ANALYTICS", "WSI=%.1f FSI=%.2f drift=[%d,%d]",
                 _result.wsi, _result.fsi,
                 (int)_result.drift_temp,
-                (int)_result.drift_ph,
                 (int)_result.drift_tds);
 }
 
@@ -76,24 +73,18 @@ void Analytics::_updateEma(const CleanReading& latest) {
     // Khởi tạo EMA từ giá trị đầu tiên hợp lệ
     if (!_ema.initialized) {
         if (latest.source_temperature != DataSource::FALLBACK_DEFAULT &&
-            latest.source_ph          != DataSource::FALLBACK_DEFAULT &&
             latest.source_tds         != DataSource::FALLBACK_DEFAULT) {
             _ema.temp        = latest.temperature;
-            _ema.ph          = latest.ph;
             _ema.tds         = latest.tds;
             _ema.initialized = true;
-            LOG_DEBUG("ANALYTICS", "EMA initialized: T=%.2f pH=%.3f TDS=%.1f",
-                      _ema.temp, _ema.ph, _ema.tds);
+            LOG_DEBUG("ANALYTICS", "EMA initialized: T=%.2f TDS=%.1f",
+                      _ema.temp, _ema.tds);
         }
         return;
     }
 
     if (latest.source_temperature != DataSource::FALLBACK_DEFAULT) {
         _ema.temp = alpha * latest.temperature + (1.0f - alpha) * _ema.temp;
-    }
-
-    if (latest.source_ph != DataSource::FALLBACK_DEFAULT) {
-        _ema.ph = alpha * latest.ph + (1.0f - alpha) * _ema.ph;
     }
 
     if (latest.source_tds != DataSource::FALLBACK_DEFAULT) {
@@ -145,15 +136,6 @@ void Analytics::_updateCusum(const CleanReading& latest) {
         }
     }
 
-    if (latest.source_ph == DataSource::MEASURED) {
-        _result.drift_ph = _computeCusum(latest.ph, _ema.ph, _cusumPh);
-        if (_result.drift_ph != DriftDir::NONE) {
-            LOG_WARNING("ANALYTICS", "pH DRIFT %s: pH=%.3f ema=%.3f",
-                        _result.drift_ph == DriftDir::UP ? "UP" : "DOWN",
-                        latest.ph, _ema.ph);
-        }
-    }
-
     if (latest.source_tds == DataSource::MEASURED) {
         _result.drift_tds = _computeCusum(latest.tds, _ema.tds, _cusumTds);
         if (_result.drift_tds != DriftDir::NONE) {
@@ -189,13 +171,10 @@ float Analytics::_coeffOfVariation(
     size_t count = 0;
     for (size_t i = startIdx; i < buf.size(); i++) {
         const CleanReading& r = buf[i];
-        // Lấy field tương ứng (nhiệt độ, pH, hoặc TDS)
         // Kiểm tra source: chỉ tính MEASURED
         bool isMeasured = false;
         if (field == &CleanReading::temperature)
             isMeasured = (r.source_temperature == DataSource::MEASURED);
-        else if (field == &CleanReading::ph)
-            isMeasured = (r.source_ph == DataSource::MEASURED);
         else if (field == &CleanReading::tds)
             isMeasured = (r.source_tds == DataSource::MEASURED);
 
@@ -218,8 +197,6 @@ float Analytics::_coeffOfVariation(
         bool isMeasured = false;
         if (field == &CleanReading::temperature)
             isMeasured = (r.source_temperature == DataSource::MEASURED);
-        else if (field == &CleanReading::ph)
-            isMeasured = (r.source_ph == DataSource::MEASURED);
         else if (field == &CleanReading::tds)
             isMeasured = (r.source_tds == DataSource::MEASURED);
 
@@ -241,12 +218,10 @@ void Analytics::_updateWsi(const CircularBuffer<CleanReading, SENSOR_HISTORY_SIZ
     }
 
     float cv_temp = _coeffOfVariation(buf, _cfg.wsi_window, &CleanReading::temperature);
-    float cv_ph   = _coeffOfVariation(buf, _cfg.wsi_window, &CleanReading::ph);
     float cv_tds  = _coeffOfVariation(buf, _cfg.wsi_window, &CleanReading::tds);
 
-    // WSI = 100 − weighted CV sum × 100
+    // WSI = 100 − weighted CV sum × 100  (temp=0.6, tds=0.4)
     float instability = (_cfg.wsi_weight_temp * cv_temp +
-                         _cfg.wsi_weight_ph   * cv_ph   +
                          _cfg.wsi_weight_tds  * cv_tds) * 100.0f;
 
     _result.wsi = 100.0f - instability;
@@ -259,27 +234,23 @@ void Analytics::_updateWsi(const CircularBuffer<CleanReading, SENSOR_HISTORY_SIZ
 // ================================================================
 // FSI — Fluctuation Severity Index
 //
-// FSI = α×|ΔT| + β×|ΔpH| + penalty × (số shock trong chu kỳ này)
+// FSI = α×|ΔT| + penalty × (số shock trong chu kỳ này)
 // So sánh CleanReading hiện tại với lần trước.
 // ================================================================
 void Analytics::_updateFsi(const CleanReading& latest) {
-    // Đếm shock trong reading này
-    uint32_t shocks = (latest.shock_temperature ? 1 : 0) +
-                      (latest.shock_ph          ? 1 : 0);
+    // Đếm shock trong reading này (chỉ còn shock_temperature)
+    uint32_t shocks = (latest.shock_temperature ? 1 : 0);
 
     if (!_hasPrev) {
         _prevTemp  = latest.temperature;
-        _prevPh    = latest.ph;
         _hasPrev   = true;
         _result.fsi = shocks * _cfg.fsi_shock_penalty;
         return;
     }
 
-    float deltaT  = fabsf(latest.temperature - _prevTemp);
-    float deltaPh = fabsf(latest.ph - _prevPh);
+    float deltaT = fabsf(latest.temperature - _prevTemp);
 
     _result.fsi = _cfg.fsi_alpha * deltaT
-                + _cfg.fsi_beta  * deltaPh
                 + _cfg.fsi_shock_penalty * (float)shocks;
 
     // Clamp tối thiểu 0
@@ -287,10 +258,9 @@ void Analytics::_updateFsi(const CleanReading& latest) {
 
     // Cập nhật prev chỉ với MEASURED data
     if (latest.source_temperature == DataSource::MEASURED) _prevTemp = latest.temperature;
-    if (latest.source_ph          == DataSource::MEASURED) _prevPh   = latest.ph;
 
     if (_result.fsi > 5.0f) {
-        LOG_DEBUG("ANALYTICS", "FSI=%.2f dT=%.3f dpH=%.4f shocks=%lu",
-                  _result.fsi, deltaT, deltaPh, (unsigned long)shocks);
+        LOG_DEBUG("ANALYTICS", "FSI=%.2f dT=%.3f shocks=%lu",
+                  _result.fsi, deltaT, (unsigned long)shocks);
     }
 }

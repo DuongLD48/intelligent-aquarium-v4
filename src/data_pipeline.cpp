@@ -6,41 +6,37 @@
 
 // ================================================================
 // data_pipeline.cpp
-// Intelligent Aquarium v4.0
+// Intelligent Aquarium v4.2
 //
-// 3 tầng filter cho nhiệt độ, pH, TDS:
+// 3 tầng filter cho nhiệt độ và TDS:
 //   Tầng 1 — Range Gate   : loại NaN / ngoài range
 //   Tầng 2 — MAD Filter   : loại spike thống kê
-//   Tầng 3 — Shock Flag   : cảnh báo thay đổi đột ngột
+//   Tầng 3 — Shock Flag   : cảnh báo thay đổi đột ngột (temp only)
 // ================================================================
 
 // ----------------------------------------------------------------
 // Constructor — khởi tạo state
 // ----------------------------------------------------------------
 DataPipeline::DataPipeline()
-    : _lastGoodTemp(25.0f), _lastGoodPh(7.0f), _lastGoodTds(200.0f),
-      _hasLastGoodTemp(false), _hasLastGoodPh(false), _hasLastGoodTds(false),
-      _fallbackTemp(0), _fallbackPh(0), _fallbackTds(0),
-      _prevCleanTemp(25.0f), _prevCleanPh(7.0f),
-      _hasPrevCleanTemp(false), _hasPrevCleanPh(false)
+    : _lastGoodTemp(25.0f), _lastGoodTds(200.0f),
+      _hasLastGoodTemp(false), _hasLastGoodTds(false),
+      _fallbackTemp(0), _fallbackTds(0),
+      _prevCleanTemp(25.0f),
+      _hasPrevCleanTemp(false)
 {}
 
 // ----------------------------------------------------------------
 void DataPipeline::reset() {
     _validTemp.clear();
-    _validPh.clear();
     _validTds.clear();
 
     _hasLastGoodTemp = false;
-    _hasLastGoodPh   = false;
     _hasLastGoodTds  = false;
 
     _fallbackTemp = 0;
-    _fallbackPh   = 0;
     _fallbackTds  = 0;
 
     _hasPrevCleanTemp = false;
-    _hasPrevCleanPh   = false;
 
     LOG_INFO("PIPELINE", "Pipeline reset");
 }
@@ -48,9 +44,8 @@ void DataPipeline::reset() {
 // ----------------------------------------------------------------
 void DataPipeline::setConfig(const PipelineConfig& cfg) {
     _cfg = cfg;
-    LOG_INFO("PIPELINE", "Config updated: T[%.1f,%.1f] pH[%.1f,%.1f] TDS[%.0f,%.0f]",
+    LOG_INFO("PIPELINE", "Config updated: T[%.1f,%.1f] TDS[%.0f,%.0f]",
              cfg.temp_min, cfg.temp_max,
-             cfg.ph_min,   cfg.ph_max,
              cfg.tds_min,  cfg.tds_max);
 }
 
@@ -238,9 +233,7 @@ CleanReading DataPipeline::process(const SensorReading& raw) {
 
     // Reset shock flags + before values
     out.shock_temperature = false;
-    out.shock_ph          = false;
     out.shock_temp_before = 0.0f;
-    out.shock_ph_before   = 0.0f;
 
     // ---- Xử lý Temperature ----
     FieldResult rTemp = _processField(
@@ -255,20 +248,6 @@ CleanReading DataPipeline::process(const SensorReading& raw) {
     out.source_temperature  = rTemp.source;
     out.status_temperature  = rTemp.status;
     out.fallback_count_temp = rTemp.fallback_count;
-
-    // ---- Xử lý pH ----
-    FieldResult rPh = _processField(
-        raw.ph,
-        _cfg.ph_min, _cfg.ph_max,
-        _cfg.mad_floor_ph,
-        _validPh,
-        _lastGoodPh, _hasLastGoodPh,
-        _fallbackPh
-    );
-    out.ph         = rPh.value;
-    out.source_ph  = rPh.source;
-    out.status_ph  = rPh.status;
-    out.fallback_count_ph = rPh.fallback_count;
 
     // ---- Xử lý TDS ----
     FieldResult rTds = _processField(
@@ -285,17 +264,14 @@ CleanReading DataPipeline::process(const SensorReading& raw) {
     out.fallback_count_tds = rTds.fallback_count;
 
     // ============================================================
-    // TẦNG 3 — SHOCK FLAG
+    // TẦNG 3 — SHOCK FLAG (nhiệt độ)
     // Chỉ check khi field vừa MEASURED (không phải fallback)
-    // So sánh với giá trị clean trước đó
     // ============================================================
-
-    // Shock nhiệt độ
     if (rTemp.source == DataSource::MEASURED && _hasPrevCleanTemp) {
         float delta = fabsf(out.temperature - _prevCleanTemp);
         if (delta > _cfg.shock_temp_delta) {
             out.shock_temperature = true;
-            out.shock_temp_before = _prevCleanTemp;  // giá trị trước shock
+            out.shock_temp_before = _prevCleanTemp;
             LOG_WARNING("PIPELINE", "Shock TEMP: %.2f → %.2f (delta=%.2f)",
                         _prevCleanTemp, out.temperature, delta);
         }
@@ -305,28 +281,12 @@ CleanReading DataPipeline::process(const SensorReading& raw) {
         _hasPrevCleanTemp = true;
     }
 
-    // Shock pH
-    if (rPh.source == DataSource::MEASURED && _hasPrevCleanPh) {
-        float delta = fabsf(out.ph - _prevCleanPh);
-        if (delta > _cfg.shock_ph_delta) {
-            out.shock_ph = true;
-            out.shock_ph_before = _prevCleanPh;  // giá trị trước shock
-            LOG_WARNING("PIPELINE", "Shock pH: %.3f → %.3f (delta=%.3f)",
-                        _prevCleanPh, out.ph, delta);
-        }
-    }
-    if (rPh.source == DataSource::MEASURED) {
-        _prevCleanPh    = out.ph;
-        _hasPrevCleanPh = true;
-    }
-
     // ---- Summary log ----
     LOG_DEBUG("PIPELINE",
-              "Clean T=%.2f(%s) pH=%.3f(%s) TDS=%.1f(%s) shock=[%d,%d]",
+              "Clean T=%.2f(%s) TDS=%.1f(%s) shock_temp=%d",
               out.temperature, out.status_temperature == FieldStatus::OK ? "OK" : "FB",
-              out.ph,          out.status_ph          == FieldStatus::OK ? "OK" : "FB",
               out.tds,         out.status_tds         == FieldStatus::OK ? "OK" : "FB",
-              out.shock_temperature, out.shock_ph);
+              out.shock_temperature);
 
     return out;
 }

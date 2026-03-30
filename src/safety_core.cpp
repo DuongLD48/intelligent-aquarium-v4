@@ -169,13 +169,8 @@ SafetyEvent SafetyCore::_checkSensorReliability(RelayCommand& cmd, const CleanRe
         }
     }
 
-    if (clean.source_ph == DataSource::FALLBACK_DEFAULT) {
-        if (cmd.ph_up || cmd.ph_down) {
-            cmd.ph_up = cmd.ph_down = false;
-            LOG_ERROR("SAFETY", "pH FALLBACK_DEFAULT → pH pumps OFF");
-            triggered = true;
-        }
-    }
+    // pH không có trong CleanReading — pH pump kiểm soát bởi PhSessionManager
+    // Không cần check source_ph ở đây
 
     // TDS không có relay → chỉ log
     if (clean.source_tds == DataSource::FALLBACK_DEFAULT) {
@@ -202,14 +197,7 @@ SafetyEvent SafetyCore::_checkStaleSensor(RelayCommand& cmd, const CleanReading&
         }
     }
 
-    if (clean.fallback_count_ph >= threshold) {
-        if (cmd.ph_up || cmd.ph_down) {
-            cmd.ph_up = cmd.ph_down = false;
-            LOG_WARNING("SAFETY", "pH stale (%d >= %d) → pH pumps OFF",
-                        clean.fallback_count_ph, threshold);
-            triggered = true;
-        }
-    }
+    // pH pump không check stale qua pipeline — kiểm soát bởi PhSessionManager
 
     // TDS stale → chỉ log
     if (clean.fallback_count_tds >= threshold) {
@@ -361,7 +349,29 @@ SafetyEvent SafetyCore::_checkPhPumpTiming(RelayCommand& cmd) {
 }
 
 // ================================================================
-// CHECK 7 — SHOCK GUARD
+// checkPhPumpAllowed — gọi từ PhSessionManager trước _startPulse()
+// Tái dùng logic _checkPhPumpTiming nhưng không cần RelayCommand.
+// Trả true → được phép, cập nhật _lastPhPumpOnTime.
+// Trả false → bị block (interval chưa đủ).
+// ================================================================
+bool SafetyCore::checkPhPumpAllowed() {
+    uint32_t now     = millis();
+    uint32_t elapsed = now - _lastPhPumpOnTime;
+
+    if (_lastPhPumpOnTime > 0 && elapsed < _lim.ph_pump_min_interval_ms) {
+        LOG_WARNING("SAFETY", "checkPhPumpAllowed: blocked — interval %lums < min %lums",
+                    (unsigned long)elapsed,
+                    (unsigned long)_lim.ph_pump_min_interval_ms);
+        return false;
+    }
+
+    // Cho phép → ghi nhận thời điểm ngay
+    _lastPhPumpOnTime = now;
+    LOG_DEBUG("SAFETY", "checkPhPumpAllowed: OK (elapsed=%lums)", (unsigned long)elapsed);
+    return true;
+}
+
+
 // Nếu có shock flag → tạm dừng điều khiển pH pump 1 chu kỳ.
 // KHÔNG tắt heater/cooler khi đang chạy ổn định — shock nhiệt độ
 // có thể do nước thay nước, sò, hoặc cooler/heater đang hoạt động
@@ -381,8 +391,8 @@ SafetyEvent SafetyCore::_checkShockGuard(RelayCommand& cmd, const CleanReading& 
 
     if (hasShock) {
         _shockHold = true;
-        LOG_WARNING("SAFETY", "Shock detected (T=%d pH=%d) → will hold pH pump next cycle",
-                    clean.shock_temperature, clean.shock_ph);
+        LOG_WARNING("SAFETY", "Shock detected (T=%d) → will hold pH pump next cycle",
+                    clean.shock_temperature);
     }
 
     return SafetyEvent::NONE;

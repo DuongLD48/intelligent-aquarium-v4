@@ -7,14 +7,20 @@
 
 // ================================================================
 // sensor_manager.cpp
-// Intelligent Aquarium v4.0
+// Intelligent Aquarium v4.1
 //
-// Đọc 3 cảm biến: DS18B20 (nhiệt độ), pH analog, TDS analog.
-// Không có filter — chỉ đọc và push raw vào buffer.
+// readSensors(): đọc Temp + TDS mỗi 5s. pH = NAN luôn.
+// readPhOnce():  đọc pH 1 lần duy nhất, chỉ gọi từ PhSessionManager
+//                khi đang trong phase COLLECTING (safe mode = relay tắt hết).
+//
+// Lý do tách biệt:
+//   - Relay gây nhiễu điện từ lên ADC pH rất nặng
+//   - Chỉ đọc pH khi tất cả relay đã tắt (trong safe mode của session)
+//   - Loop bình thường không cần pH → không đọc
 // ================================================================
 
 // ----------------------------------------------------------------
-// Định nghĩa global buffer (extern trong .h)
+// Global buffer
 // ----------------------------------------------------------------
 CircularBuffer<SensorReading, SENSOR_HISTORY_SIZE> rawSensorBuffer;
 
@@ -27,136 +33,81 @@ static DallasTemperature dsSensor(&oneWire);
 // ----------------------------------------------------------------
 // Hằng số nội bộ
 // ----------------------------------------------------------------
-static constexpr float DS18B20_MIN_C     = -55.0f;
-static constexpr float DS18B20_MAX_C     = 125.0f;
-static constexpr float ADC_MAX           = 4095.0f;  // ESP32 ADC 12-bit
-static constexpr float ADC_VREF          = 3.3f;     // Vref ESP32
-
-// TDS temperature compensation reference
-static constexpr float TDS_TEMP_REF_C    = 25.0f;
+static constexpr float DS18B20_MIN_C          = -55.0f;
+static constexpr float DS18B20_MAX_C          = 125.0f;
+static constexpr float ADC_MAX                = 4095.0f;
+static constexpr float ADC_VREF               = 3.3f;
+static constexpr float TDS_TEMP_REF_C         = 25.0f;
+static constexpr unsigned long DS18B20_CONVERSION_MS = 800UL;
 
 // ----------------------------------------------------------------
 // State nội bộ
 // ----------------------------------------------------------------
-static unsigned long _lastReadMs     = 0;
-static unsigned long _tempRequestMs  = 0;   // millis() khi gửi requestTemperatures()
-static bool          _tempRequested  = false; // đang chờ DS18B20 convert
-static float         _lastRawTemp    = NAN;
-static bool          _initialized    = false;
-
-// DS18B20 conversion time tối đa ở 12-bit = 750ms
-static constexpr unsigned long DS18B20_CONVERSION_MS = 800UL; // 50ms margin
+static unsigned long _lastReadMs    = 0;
+static unsigned long _tempRequestMs = 0;
+static bool          _tempRequested = false;
+static float         _lastRawTemp   = NAN;
+static bool          _initialized   = false;
 
 // ----------------------------------------------------------------
-// Calibration runtime — mặc định từ system_constants.h,
-// được ghi đè bởi sensorManagerSetCalibration() khi Firebase update
+// Calibration runtime
 // ----------------------------------------------------------------
 static float _phSlope   = PH_CALIB_SLOPE_DEFAULT;
 static float _phOffset  = PH_CALIB_OFFSET_DEFAULT;
 static float _tdsFactor = TDS_CALIB_FACTOR_DEFAULT;
 
 // ----------------------------------------------------------------
-// Helpers — chuyển đổi ADC → giá trị vật lý
+// Helpers
 // ----------------------------------------------------------------
-
-// ADC raw → voltage (mV không cần, dùng V)
 static inline float _adcToVoltage(int raw) {
     return (raw / ADC_MAX) * ADC_VREF;
 }
 
-// Voltage → pH dùng calibration slope + offset
-// pH = slope × voltage + offset
 static float _voltageToPh(float voltage) {
     return _phSlope * voltage + _phOffset;
 }
 
-// Voltage → TDS (ppm) với bù nhiệt độ
-// Công thức chuẩn từ datasheet module TDS analog:
-//   TDS = (133.42 × V³ − 255.86 × V² + 857.39 × V) × 0.5 × factor
-//   Bù nhiệt: chia cho (1 + 0.02 × (T − 25))
 static float _voltageToTds(float voltage, float tempC) {
-    // Tránh NaN nếu nhiệt độ không hợp lệ → dùng 25°C
     float temp = isnan(tempC) ? TDS_TEMP_REF_C : tempC;
-
     float tdsRaw = (133.42f * voltage * voltage * voltage
                   - 255.86f * voltage * voltage
                   + 857.39f * voltage) * 0.5f;
-
-    // Temperature compensation
     float compensation = 1.0f + 0.02f * (temp - TDS_TEMP_REF_C);
-    if (compensation < 0.01f) compensation = 0.01f;  // Tránh chia 0
-
+    if (compensation < 0.01f) compensation = 0.01f;
     return (tdsRaw / compensation) * _tdsFactor;
 }
 
-// ----------------------------------------------------------------
-// Đọc pH
-// Trả về giá trị pH (có thể âm hoặc > 14 — pipeline sẽ lọc).
-// ----------------------------------------------------------------
-static float _readPh() {
-    // Lấy trung bình 5 mẫu để giảm nhiễu ADC (đây không phải filter
-    // logic, chỉ là đặc tính đọc ADC của ESP32)
-    int32_t sum = 0;
-    for (int i = 0; i < 5; i++) {
-        sum += analogRead(PIN_PH_ADC);
-        delayMicroseconds(100);
-    }
-    float raw = (float)(sum / 5);
-    float voltage = _adcToVoltage(raw);
-    float ph = _voltageToPh(voltage);
-
-    LOG_VERBOSE("SENSOR", "pH ADC=%d V=%.3f pH=%.3f", (int)(sum/5), voltage, ph);
-    return ph;
-}
-
-// ----------------------------------------------------------------
-// Đọc TDS (dùng nhiệt độ mới nhất để bù)
-// ----------------------------------------------------------------
-static float _readTds(float currentTemp) {
-    int32_t sum = 0;
-    for (int i = 0; i < 5; i++) {
-        sum += analogRead(PIN_TDS_ADC);
-        delayMicroseconds(100);
-    }
-    float raw = (float)(sum / 5);
-    float voltage = _adcToVoltage(raw);
-    float tds = _voltageToTds(voltage, currentTemp);
-
-    LOG_VERBOSE("SENSOR", "TDS ADC=%d V=%.3f TDS=%.1f ppm", (int)(sum/5), voltage, tds);
-    return tds;
-}
-
 // ================================================================
-// PUBLIC API
+// INIT
 // ================================================================
-
 void sensor_manager_init() {
-    // DS18B20 — async mode: requestTemperatures() không block
     dsSensor.begin();
-    dsSensor.setWaitForConversion(false);  // NON-BLOCKING
+    dsSensor.setWaitForConversion(false);
     uint8_t count = dsSensor.getDeviceCount();
     if (count == 0) {
         LOG_ERROR("SENSOR", "No DS18B20 found on GPIO %d!", PIN_DS18B20);
     } else {
         LOG_INFO("SENSOR", "DS18B20 found: %d device(s)", count);
     }
-
-    // ADC pins — GPIO 34, 35 là input-only, không cần pinMode
-    // nhưng set attenuation để đọc đúng 0–3.3V
-    analogSetAttenuation(ADC_11db);   // Full range 0–3.3V trên ESP32
-
+    analogSetAttenuation(ADC_11db);
     _initialized = true;
     LOG_INFO("SENSOR", "Sensor manager init OK");
 }
 
-// ----------------------------------------------------------------
+// ================================================================
+// READ SENSORS — mỗi 5 giây, Temp + TDS chỉ, pH = NAN
+//
+// pH KHÔNG được đọc ở đây. Lý do:
+//   - Relay heater/cooler đang chạy gây nhiễu điện từ nặng lên ADC pH
+//   - Khi đọc pH ở đây, giá trị dao động ±2 đơn vị mỗi chu kỳ (xem log)
+//   - Giải pháp: chỉ đọc pH khi safe mode (relay tắt) qua readPhOnce()
+// ================================================================
 bool readSensors() {
     if (!_initialized) return false;
 
     unsigned long now = millis();
 
-    // ── Bước A: Gửi lệnh request sớm 800ms trước chu kỳ đọc ─────
-    // requestTemperatures() non-blocking, trả về ngay lập tức
+    // Request DS18B20 trước 800ms
     if (!_tempRequested &&
         now - _lastReadMs >= (SENSOR_READ_INTERVAL_MS - DS18B20_CONVERSION_MS)) {
         dsSensor.requestTemperatures();
@@ -164,14 +115,11 @@ bool readSensors() {
         _tempRequested = true;
     }
 
-    // ── Bước B: Chưa đến chu kỳ 5s → thoát sớm ─────────────────
-    if (now - _lastReadMs < SENSOR_READ_INTERVAL_MS) {
-        return false;
-    }
+    if (now - _lastReadMs < SENSOR_READ_INTERVAL_MS) return false;
     _lastReadMs    = now;
-    _tempRequested = false;  // reset cho chu kỳ tiếp
+    _tempRequested = false;
 
-    // ── Bước C: Đọc kết quả (conversion đã xong từ ~800ms trước) ─
+    // Đọc nhiệt độ
     float temp = NAN;
     float t = dsSensor.getTempCByIndex(0);
     if (t == DEVICE_DISCONNECTED_C || isnan(t)) {
@@ -183,33 +131,60 @@ bool readSensors() {
         _lastRawTemp = t;
     }
 
-    float ph  = _readPh();
-    delay(20); 
-    float tds = _readTds(isnan(temp) ? _lastRawTemp : temp);
+    // Đọc TDS
+    delay(5);
+    int32_t sum = 0;
+    for (int i = 0; i < 5; i++) {
+        sum += analogRead(PIN_TDS_ADC);
+        delayMicroseconds(100);
+    }
+    float tds = _voltageToTds(
+        _adcToVoltage((float)(sum / 5)),
+        isnan(temp) ? _lastRawTemp : temp
+    );
 
+    // pH không đọc trong loop bình thường — chỉ qua PhSessionManager (safe mode)
     SensorReading reading;
     reading.timestamp   = now;
     reading.temperature = temp;
-    reading.ph          = ph;
     reading.tds         = tds;
 
     rawSensorBuffer.push(reading);
 
-    LOG_DEBUG("SENSOR", "Raw T=%.2f pH=%.3f TDS=%.1f ts=%lu",
-              temp, ph, tds, now);
+    LOG_DEBUG("SENSOR", "Raw T=%.2f pH=-- TDS=%.1f ts=%lu",
+              temp, tds, now);
 
     return true;
 }
 
-// ----------------------------------------------------------------
+// ================================================================
+// READ PH ONCE — đọc 1 mẫu pH duy nhất
+//
+// Chỉ gọi từ PhSessionManager khi đang COLLECTING (relay tắt hết).
+// Lấy trung bình 16 mẫu ADC để giảm nhiễu lượng tử.
+// Không push vào rawSensorBuffer — trả về giá trị thô cho session tự xử lý.
+// ================================================================
+float readPhOnce() {
+    // 16 mẫu ADC, delay nhỏ giữa các lần để tránh nhiễu chuyển mạch ADC
+    int32_t sum = 0;
+    for (int i = 0; i < 16; i++) {
+        sum += analogRead(PIN_PH_ADC);
+        delayMicroseconds(200);
+    }
+    float voltage = _adcToVoltage((float)(sum / 16));
+    float ph      = _voltageToPh(voltage);
+    LOG_DEBUG("SENSOR", "readPhOnce: adc=%d V=%.4f pH=%.3f",
+              (int)(sum / 16), voltage, ph);
+    return ph;
+}
+
+// ================================================================
+// HELPERS
+// ================================================================
 bool isSensorDataReady() {
     return !rawSensorBuffer.isEmpty();
 }
 
-// ----------------------------------------------------------------
-// Cập nhật calibration runtime — gọi từ ConfigManager khi Firebase
-// gửi settings/calibration mới. Có hiệu lực ngay chu kỳ đọc tiếp.
-// ----------------------------------------------------------------
 void sensorManagerSetCalibration(float phSlope, float phOffset, float tdsFactor) {
     if (phSlope == 0.0f || tdsFactor <= 0.0f) {
         LOG_ERROR("SENSOR", "setCalibration rejected: slope=%.4f factor=%.4f",

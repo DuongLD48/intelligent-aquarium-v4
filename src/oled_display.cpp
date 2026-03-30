@@ -1,5 +1,6 @@
 #include "oled_display.h"
 #include "button_manager.h"
+#include "ph_session_manager.h"
 #include "logger.h"
 #include <WiFi.h>
 #include <Wire.h>
@@ -213,10 +214,10 @@ void OledDisplay::_renderHome() {
     // Sensor summary line
     char buf[32];
     if (_pClean) {
-        snprintf(buf, sizeof(buf), "T:%.1f pH:%.2f TDS:%.0f",
-                 _pClean->temperature, _pClean->ph, _pClean->tds);
+        snprintf(buf, sizeof(buf), "T:%.1f TDS:%.0f",
+                 _pClean->temperature, _pClean->tds);
     } else {
-        snprintf(buf, sizeof(buf), "T:-- pH:-- TDS:--");
+        snprintf(buf, sizeof(buf), "T:-- TDS:--");
     }
     _display.setCursor(0, 12);
     _display.print(buf);
@@ -277,10 +278,13 @@ void OledDisplay::_renderViewSensors() {
              _statusChar(c.status_temperature));
     _display.setCursor(0, y); _display.print(buf); y += 10;
 
-    snprintf(buf, sizeof(buf), "pH: %5.2f    [%c%c]",
-             c.ph,
-             _sourceChar(c.source_ph),
-             _statusChar(c.status_ph));
+    // pH đến từ phSessionMgr (đo thưa, không qua pipeline)
+    float lastPh = phSessionMgr.lastMedianPh();
+    if (!isnan(lastPh)) {
+        snprintf(buf, sizeof(buf), "pH: %5.2f [sess]", lastPh);
+    } else {
+        snprintf(buf, sizeof(buf), "pH: --    [sess]");
+    }
     _display.setCursor(0, y); _display.print(buf); y += 10;
 
     snprintf(buf, sizeof(buf), "TDS:%4.0fppm  [%c%c]",
@@ -289,11 +293,9 @@ void OledDisplay::_renderViewSensors() {
              _statusChar(c.status_tds));
     _display.setCursor(0, y); _display.print(buf); y += 10;
 
-    if (c.has_shock()) {
+    if (c.shock_temperature) {
         _display.setCursor(0, y);
-        _display.print("! SHOCK:");
-        if (c.shock_temperature) _display.print("T ");
-        if (c.shock_ph)          _display.print("pH");
+        _display.print("! SHOCK: T");
     }
 }
 
@@ -308,10 +310,7 @@ void OledDisplay::_renderViewAnalytics() {
     char buf[28];
     int16_t y = 13;
 
-    snprintf(buf, sizeof(buf), "EMA T:%.1f pH:%.2f", r.ema_temp, r.ema_ph);
-    _display.setCursor(0, y); _display.print(buf); y += 9;
-
-    snprintf(buf, sizeof(buf), "    TDS:%.0fppm", r.ema_tds);
+    snprintf(buf, sizeof(buf), "EMA T:%.1f TDS:%.0f", r.ema_temp, r.ema_tds);
     _display.setCursor(0, y); _display.print(buf); y += 9;
 
     _display.setCursor(0, y); _display.print("WSI:");
@@ -325,8 +324,8 @@ void OledDisplay::_renderViewAnalytics() {
     snprintf(buf, sizeof(buf), "%3.0f", r.fsi);
     _display.setCursor(104, y); _display.print(buf); y += 9;
 
-    snprintf(buf, sizeof(buf), "T:%s pH:%s TDS:%s",
-             _driftStr(r.drift_temp), _driftStr(r.drift_ph), _driftStr(r.drift_tds));
+    snprintf(buf, sizeof(buf), "T:%s TDS:%s",
+             _driftStr(r.drift_temp), _driftStr(r.drift_tds));
     _display.setCursor(0, y); _display.print(buf);
 }
 

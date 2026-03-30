@@ -13,33 +13,41 @@
 #include <Arduino.h>
 
 // ================================================================
-// wifi_firebase.h — Intelligent Aquarium v4.2
+// wifi_firebase.h — Intelligent Aquarium v4.2 (PhDose update)
 //
 // WiFiManager  : kết nối WiFi non-blocking + auto-reconnect
 // AquaFirebaseClient: upload telemetry 10s + 2 SSE streams
 //
-// Thư viện: mobizt/FirebaseClient (v2.x)
-//   platformio.ini:
-//     lib_deps = mobizt/FirebaseClient
+// Thay đổi:
+//   - Bỏ PID gains khỏi settings/config
+//   + Thêm settings/ph_dose_config group (stream + parse)
+//   + Upload ph_session node (state, last_median_ph, last_pulse_ms)
 //
 // ── SCHEMA ──────────────────────────────────────────────────────
 //  /devices/{DEVICE_ID}/
-//    telemetry/                  <- ESP32 ghi 10s
-//    analytics/                  <- ESP32 ghi 10s
-//    relay_state/                <- ESP32 ghi 10s
-//    status/                     <- ESP32 ghi 10s (bỏ last_safety_event)
-//    water_change/               <- ESP32 ghi state/last_run/trigger_source
-//                                   Web ghi manual_trigger=true
-//    settings/                   <- Web ghi, ESP32 stream
+//    telemetry/                  ← ESP32 ghi 10s
+//    analytics/                  ← ESP32 ghi 10s
+//    relay_state/                ← ESP32 ghi 10s
+//    status/                     ← ESP32 ghi 10s
+//    ph_session/                 ← ESP32 ghi 10s (state, median_ph, pulse...)
+//    water_change/               ← ESP32 + Web
+//    settings/
+//      config/                   ← temp, pH range, TDS (không còn PID)
+//      ph_dose_config/           ← interval, base_ms, slope, max_ms, warmup
+//      pipeline_config/
+//      analytics_config/
+//      safety_limits/
+//      water_schedule/
+//      calibration/
 //    history/
-//      chart/{ts}                <- ESP32 ghi 60s {temp, ph, tds}
-//      shock_event_ph/{ts}       <- khi shock pH  {ph_before, ph_after, is_read}
-//      shock_event_temp/{ts}     <- khi shock temp {temp_before, temp_after, is_read}
-//      last_safety_event/{ts}    <- khi safety event {event, is_read}
+//      chart/{ts}
+//      shock_event_ph/{ts}
+//      shock_event_temp/{ts}
+//      last_safety_event/{ts}
 //
 // ── 2 STREAMS ───────────────────────────────────────────────────
-//  Stream1: /settings        -> parse 5 config groups
-//  Stream2: /manual_trigger  -> kich hoat thay nuoc tu Web
+//  Stream1: /settings        → parse 7 config groups
+//  Stream2: /manual_trigger  → kích hoạt thay nước
 // ================================================================
 
 // ----------------------------------------------------------------
@@ -94,13 +102,17 @@ public:
 
     void pushSafetyEvent(SafetyEvent evt);
 
+    // pH session events — gọi từ PhSessionManager
+    void logPhSensorError(float spread, float threshold, uint8_t samples);
+    void logPhShockEvent (float phBefore, float phAfter, float delta);
+
     void notifyButtonTrigger();
     void notifyScheduleTrigger();
     void notifyTriggerDone();
 
     bool isReady() const { return _ready; }
 
-    // Semi-public: chi de free-function callback truy cap
+    // Semi-public: cho free-function callbacks truy cập
     uint32_t _lastSettingsStreamMs;
     uint32_t _lastTriggerStreamMs;
     void _onSettingsPayload(const char* path, const char* data);
@@ -111,21 +123,26 @@ private:
     uint32_t _lastUploadMs;
     uint32_t _lastHistoryMs;
 
-    // Rising edge tracking — chỉ gửi shock event khi false → true
-    bool _prevShockPh;
+    // Rising edge tracking (chỉ còn temp — pH shock log từ PhSessionManager)
     bool _prevShockTemp;
+
+    // History dedup — chỉ ghi field nếu giá trị thay đổi
+    float _prevHistTemp;
+    float _prevHistTds;
+    float _prevHistPh;   // lấy từ phSessionMgr.lastMedianPh()
 
     void _uploadAll(
         const CleanReading& c, const AnalyticsResult& a,
         const RelayCommand& r, SafetyEvent lastEvt, bool safeMode);
 
-    void _uploadHistory     (const CleanReading& c);
-    void _uploadShockEvents (const CleanReading& c);  // ghi shock_event_ph/temp khi có shock
+    void _uploadHistory    (const CleanReading& c);
+    void _uploadShockEvents(const CleanReading& c);
 
     String _buildTelemetryJson  (const CleanReading&    c);
     String _buildAnalyticsJson  (const AnalyticsResult& a);
     String _buildRelayJson      (const RelayCommand&    cmd);
     String _buildStatusJson     (bool safeMode);
+    String _buildPhSessionJson  ();   // ← Mới: trạng thái pH session
 
     void _startSettingsStream();
     void _startTriggerStream();
@@ -134,11 +151,11 @@ private:
     void _notifyWebTrigger();
     void _writeTriggerSource(const char* source);
 
-    static const char* _wcStateStr      (WaterChangeState s);
-    static const char* _safetyEventStr  (SafetyEvent      e);
-    static const char* _dataSourceStr   (DataSource       s);
-    static const char* _fieldStatusStr  (FieldStatus      s);
-    static const char* _driftDirStr     (DriftDir         d);
+    static const char* _wcStateStr    (WaterChangeState s);
+    static const char* _safetyEventStr(SafetyEvent      e);
+    static const char* _dataSourceStr (DataSource       s);
+    static const char* _fieldStatusStr(FieldStatus      s);
+    static const char* _driftDirStr   (DriftDir         d);
 };
 
 // ----------------------------------------------------------------

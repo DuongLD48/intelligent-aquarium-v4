@@ -30,14 +30,12 @@ struct AnalyticsConfig {
     float cusum_k          = 0.5f;  // Slack — độ nhạy
     float cusum_threshold  = 5.0f;  // Ngưỡng báo drift
 
-    // WSI weights (tổng = 1.0)
-    float wsi_weight_temp  = 0.4f;
-    float wsi_weight_ph    = 0.4f;
-    float wsi_weight_tds   = 0.2f;
+    // WSI weights (tổng = 1.0) — pH bỏ, temp+tds bù
+    float wsi_weight_temp  = 0.6f;
+    float wsi_weight_tds   = 0.4f;
 
     // FSI coefficients
     float fsi_alpha        = 0.5f;  // Trọng số |ΔT|
-    float fsi_beta         = 0.3f;  // Trọng số |ΔpH|
     float fsi_shock_penalty = 20.0f; // Cộng thêm mỗi shock event
 
     // Window để tính std/mean cho WSI (dùng cleanBuffer trực tiếp)
@@ -58,7 +56,6 @@ enum class DriftDir : uint8_t {
 // ----------------------------------------------------------------
 struct EmaState {
     float temp = 25.0f;
-    float ph   = 7.0f;
     float tds  = 200.0f;
     bool  initialized = false;
 };
@@ -78,12 +75,10 @@ struct CusumState {
 struct AnalyticsResult {
     // EMA
     float ema_temp = 25.0f;
-    float ema_ph   = 7.0f;
     float ema_tds  = 200.0f;
 
     // CUSUM drift
     DriftDir drift_temp = DriftDir::NONE;
-    DriftDir drift_ph   = DriftDir::NONE;
     DriftDir drift_tds  = DriftDir::NONE;
 
     // WSI: 0 (không ổn định) → 100 (rất ổn định)
@@ -95,7 +90,6 @@ struct AnalyticsResult {
     // Có bất kỳ drift nào không
     bool hasDrift() const {
         return drift_temp != DriftDir::NONE ||
-               drift_ph   != DriftDir::NONE ||
                drift_tds  != DriftDir::NONE;
     }
 };
@@ -125,16 +119,15 @@ private:
     AnalyticsConfig  _cfg;
     AnalyticsResult  _result;
 
-    // EMA state cho 3 field
+    // EMA state cho 2 field
     EmaState _ema;
 
-    // CUSUM state cho 3 field
+    // CUSUM state cho 2 field
     CusumState _cusumTemp;
-    CusumState _cusumPh;
     CusumState _cusumTds;
 
     // Giá trị CleanReading trước (cho FSI delta)
-    float    _prevTemp, _prevPh;
+    float    _prevTemp;
     bool     _hasPrev;
     uint32_t _shockCount;  // Tổng shock trong window gần nhất
 

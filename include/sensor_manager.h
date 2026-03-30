@@ -5,34 +5,34 @@
 
 // ================================================================
 // sensor_manager.h
-// Intelligent Aquarium v4.0
+// Intelligent Aquarium v4.1
 //
-// Trách nhiệm DUY NHẤT: đọc phần cứng → push vào rawSensorBuffer.
-// KHÔNG có bất kỳ logic lọc nào ở đây.
-// ※ Đã bỏ HC-SR04 / water_level_cm
+// Trách nhiệm: đọc phần cứng → push vào rawSensorBuffer.
+//
+// THAY ĐỔI v4.1:
+//   - readSensors(): chỉ đọc Temp + TDS. pH = NAN luôn.
+//   - readPhOnce():  đọc pH 1 lần, chỉ cho PhSessionManager dùng
+//                   khi relay đã tắt (COLLECTING phase).
+//
+// Lý do: relay gây nhiễu ADC pH nặng → không đọc pH khi relay chạy.
 // ================================================================
 
-// ----------------------------------------------------------------
-// Raw sensor buffer — global, các module khác đọc qua extern
-// DataPipeline sẽ consume từ đây.
-// ----------------------------------------------------------------
 extern CircularBuffer<SensorReading, SENSOR_HISTORY_SIZE> rawSensorBuffer;
 
-// ----------------------------------------------------------------
-// API
-// ----------------------------------------------------------------
-
-// Gọi trong setup(): khởi tạo OneWire, DS18B20, pinMode ADC pins
+// Gọi trong setup(): khởi tạo OneWire, DS18B20, analogSetAttenuation
 void sensor_manager_init();
 
-// Gọi trong loop() — kiểm tra interval, nếu đến lúc thì đọc
-// phần cứng và push vào rawSensorBuffer.
+// Gọi trong loop() mỗi 5 giây — đọc Temp + TDS, pH = NAN
 // Trả về true nếu vừa có mẫu mới được push.
 bool readSensors();
 
-// Kiểm tra xem rawSensorBuffer có ít nhất 1 mẫu chưa
+// Kiểm tra rawSensorBuffer có dữ liệu chưa
 bool isSensorDataReady();
 
-// Cập nhật hệ số calibration runtime (gọi từ ConfigManager).
-// Có hiệu lực ngay chu kỳ đọc tiếp theo.
+// Cập nhật calibration runtime từ ConfigManager/Firebase
 void sensorManagerSetCalibration(float phSlope, float phOffset, float tdsFactor);
+
+// Đọc 1 mẫu pH trực tiếp từ ADC (16 lần average).
+// CHỈ gọi từ PhSessionManager khi đang COLLECTING (safe mode on).
+// Không push vào rawSensorBuffer — trả thẳng giá trị pH thô.
+float readPhOnce();

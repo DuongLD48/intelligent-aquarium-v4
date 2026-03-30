@@ -14,7 +14,8 @@
 #include "config_manager.h"
 #include "safety_core.h"
 #include "hysteresis_controller.h"
-#include "pid_controller.h"
+#include "ph_dose_controller.h"      // ← Thay pid_controller.h
+#include "ph_session_manager.h"      // ← Module mới
 #include "water_change_manager.h"
 #include "analytics.h"
 #include "oled_display.h"
@@ -29,6 +30,13 @@
 //
 // setup() → systemManager.begin() + peripheral init
 // loop()  → 18 bước tuần tự mỗi 5 giây
+//
+// Thay đổi so với v4.0 cũ:
+//   - PidController → PhDoseController (linear dose)
+//   - PhSessionManager quản lý toàn bộ vòng đời đo pH:
+//       IDLE → SAFE_MODE_WAIT → COLLECTING → DOSING → IDLE
+//   - Bước 14 (PID pH) → Bước 14 (PhSession update)
+//   - pH pulse timer không còn ở main — PhSessionManager tự quản
 // ================================================================
 
 // ----------------------------------------------------------------
@@ -45,65 +53,11 @@ DataPipeline dataPipeline;
 static CleanReading    gClean;
 static AnalyticsResult gAnalytics;
 static bool            gWifiConnected = false;
-static SafetyEvent     gPrevSafetyEvt = SafetyEvent::NONE;  // rising edge guard
+static SafetyEvent     gPrevSafetyEvt = SafetyEvent::NONE;
 
 // ----------------------------------------------------------------
-// PH PULSE TIMER — non-blocking
-// Safety Core đã kiểm tra interval, đây chỉ tắt relay sau khi hết pulse
+// DEBUG PRINT — in tóm tắt mỗi chu kỳ
 // ----------------------------------------------------------------
-static struct PhPulse {
-    bool     active    = false;
-    uint8_t  relayMask = 0;   // bit 0 = ph_up, bit 1 = ph_down
-    uint32_t offAtMs   = 0;
-} gPhPulse;
-
-static void startPhPulse(bool phUp, bool phDown, uint32_t durationMs) {
-    if (durationMs == 0) return;
-    // Clamp theo safety limit
-    uint32_t maxPulse = safetyCore.getLimits().ph_pump_max_pulse_ms;
-    if (durationMs > maxPulse) durationMs = maxPulse;
-
-    gPhPulse.active    = true;
-    gPhPulse.relayMask = (phUp ? 1 : 0) | (phDown ? 2 : 0);
-    gPhPulse.offAtMs   = millis() + durationMs;
-
-    LOG_DEBUG("MAIN", "pH pulse started: up=%d down=%d dur=%lums",
-              phUp, phDown, (unsigned long)durationMs);
-}
-
-static void tickPhPulse() {
-    if (!gPhPulse.active) return;
-    if (millis() >= gPhPulse.offAtMs) {
-        // Hết thời gian → tắt pH pump qua GPIO trực tiếp
-        if (gPhPulse.relayMask & 1) digitalWrite(PIN_RELAY_PH_UP,   HIGH); // active LOW OFF
-        if (gPhPulse.relayMask & 2) digitalWrite(PIN_RELAY_PH_DOWN, HIGH);
-        gPhPulse.active = false;
-        LOG_DEBUG("MAIN", "pH pulse ended");
-    }
-}
-
-// ----------------------------------------------------------------
-// DEBUG PRINT — in tóm tắt mỗi chu kỳ (chỉ ở level VERBOSE)
-// ----------------------------------------------------------------
-// static void debugPrintCycle(const CleanReading& c,
-//                              const AnalyticsResult& a,
-//                              const RelayCommand& cmd,
-//                              SafetyEvent evt) {
-//     LOG_DEBUG("MAIN",
-//         "T=%.2f(%c) pH=%.3f(%c) TDS=%.1f(%c) | "
-//         "H=%d C=%d pHU=%d pHD=%d pIn=%d pOut=%d | "
-//         "WSI=%.0f FSI=%.2f | SafeEvt=%d | WC=%s",
-//         c.temperature, (c.source_temperature == DataSource::MEASURED ? 'M' : 'F'),
-//         c.ph,          (c.source_ph          == DataSource::MEASURED ? 'M' : 'F'),
-//         c.tds,         (c.source_tds         == DataSource::MEASURED ? 'M' : 'F'),
-//         cmd.heater, cmd.cooler, cmd.ph_up, cmd.ph_down, cmd.pump_in, cmd.pump_out,
-//         a.wsi, a.fsi, (int)evt,
-//         waterChangeManager.getState() == WaterChangeState::IDLE ? "IDLE" :
-//         waterChangeManager.getState() == WaterChangeState::PUMPING_OUT ? "OUT" :
-//         waterChangeManager.getState() == WaterChangeState::PUMPING_IN  ? "IN"  : "DONE"
-//     );
-// }
-
 static void debugPrintCycle(const CleanReading& c,
                              const AnalyticsResult& a,
                              const RelayCommand& cmd,
@@ -113,8 +67,9 @@ static void debugPrintCycle(const CleanReading& c,
     const PipelineConfig&    pipe = dataPipeline.getConfig();
     const SafetyLimits&      lim  = safetyCore.getLimits();
     const WaterChangeConfig& wc   = waterChangeManager.getConfig();
-    
-    LOG_DEBUG("START DEBUG", "------------------------------------------------------------");                         
+
+    LOG_DEBUG("START DEBUG", "------------------------------------------------------------");
+
     // ── NTP time ──────────────────────────────────────────────────
     time_t now_epoch = time(nullptr);
     if (now_epoch > 1700000000L) {
@@ -126,6 +81,19 @@ static void debugPrintCycle(const CleanReading& c,
             (long)now_epoch);
     } else {
         LOG_DEBUG("MAIN", "NTP  : NOT SYNCED (epoch=%ld)", (long)now_epoch);
+    }
+
+    // ── pH Session State ──────────────────────────────────────────
+    {
+        const PhDoseResult& _d = phSessionMgr.lastDoseResult();
+        LOG_DEBUG("PHSESS",
+            "State=%-16s | nextIn=%lus | lastPH=%.3f overshoot=%.3f | pulse=%lums(%s)",
+            phSessionMgr.stateStr(),
+            (unsigned long)phSessionMgr.secondsUntilNextSession(),
+            phSessionMgr.lastMedianPh(),
+            _d.overshoot,
+            (unsigned long)_d.pulse_ms,
+            _d.ph_up ? "UP" : _d.ph_down ? "DOWN" : "NONE");
     }
 
     // ── WaterChange last run ──────────────────────────────────────
@@ -145,70 +113,85 @@ static void debugPrintCycle(const CleanReading& c,
             waterChangeManager.getState() == WaterChangeState::IDLE ? "IDLE" : "BUSY");
     }
 
-    // ── Sensors & Relay (giữ nguyên) ─────────────────────────────
+    // ── Sensors & Relay ───────────────────────────────────────────
     LOG_DEBUG("MAIN",
-        "T=%.2f(%c) pH=%.3f(%c) TDS=%.1f(%c) | "
+        "T=%.2f(%c) TDS=%.1f(%c) | "
         "H=%d C=%d pHU=%d pHD=%d pIn=%d pOut=%d | "
         "WSI=%.0f FSI=%.2f | SafeEvt=%d",
         c.temperature, (c.source_temperature == DataSource::MEASURED ? 'M' : 'F'),
-        c.ph,          (c.source_ph          == DataSource::MEASURED ? 'M' : 'F'),
         c.tds,         (c.source_tds         == DataSource::MEASURED ? 'M' : 'F'),
         cmd.heater, cmd.cooler, cmd.ph_up, cmd.ph_down, cmd.pump_in, cmd.pump_out,
         a.wsi, a.fsi, (int)evt);
 
-    // ── ControlConfig (user settings) ─────────────────────────────
+    // ── ControlConfig (settings/config) ──────────────────────────
     LOG_DEBUG("CFG",
-        "Temp=[%.1f~%.1f] tgt=%.2f db=%.2f | "
-        "pH=[%.2f~%.2f] sp=%.2f | "
-        "TDS=%.0f±%.0f | "
-        "PID Kp=%.2f Ki=%.2f Kd=%.2f",
-        ctrl.temp_min, ctrl.temp_max, ctrl.tempTarget(), ctrl.tempDeadband(),
-        ctrl.ph_min,   ctrl.ph_max,   ctrl.phSetpoint(),
-        ctrl.tds_target, ctrl.tds_tolerance,
-        ctrl.pid_kp, ctrl.pid_ki, ctrl.pid_kd
-    );
+        "Temp=[%.1f~%.1f] | pH=[%.2f~%.2f] | TDS=%.0f±%.0f",
+        ctrl.temp_min, ctrl.temp_max,
+        ctrl.ph_min,   ctrl.ph_max,
+        ctrl.tds_target, ctrl.tds_tolerance);
 
-    // ── PipelineConfig (admin — range gate + MAD + shock) ─────────
+    // ── PhDoseConfig (settings/ph_dose_config) ───────────────────
+    const PhDoseConfig& dose = phDoseCtrl.getDoseConfig();
+    LOG_DEBUG("DOSE",
+        "interval=%lus session=%lus warmup=%lus | "
+        "base=%lums slope=%lums/unit max=%lums | "
+        "noise_thr=%.2f shock_thr=%.2f",
+        (unsigned long)(dose.measure_interval_ms / 1000),
+        (unsigned long)(dose.session_duration_ms / 1000),
+        (unsigned long)(dose.warmup_ms           / 1000),
+        (unsigned long)dose.base_pulse_ms,
+        (unsigned long)dose.pulse_per_unit,
+        (unsigned long)dose.max_pulse_ms,
+        dose.noise_threshold,
+        dose.shock_threshold);
+
+    // ── PipelineConfig (settings/pipeline_config) ────────────────
     LOG_DEBUG("PIPE",
-        "RangeT=[%.1f~%.1f] pH=[%.1f~%.1f] TDS=[%.0f~%.0f] | "
-        "MAD win=%d min=%d thr=%.2f floor=[%.2f %.2f %.1f] | "
-        "Shock dT=%.1f dpH=%.2f",
+        "RangeT=[%.1f~%.1f] TDS=[%.0f~%.0f] | "
+        "MAD win=%d min=%d thr=%.2f floorT=%.2f floorTDS=%.1f | "
+        "Shock dT=%.1f",
         pipe.temp_min, pipe.temp_max,
-        pipe.ph_min,   pipe.ph_max,
         pipe.tds_min,  pipe.tds_max,
-        (int)pipe.mad_window_size, (int)pipe.mad_min_samples, pipe.mad_threshold,
-        pipe.mad_floor_temp, pipe.mad_floor_ph, pipe.mad_floor_tds,
-        pipe.shock_temp_delta, pipe.shock_ph_delta
-    );
+        (int)pipe.mad_window_size, (int)pipe.mad_min_samples,
+        pipe.mad_threshold, pipe.mad_floor_temp, pipe.mad_floor_tds,
+        pipe.shock_temp_delta);
 
-    // ── SafetyLimits (admin — ngưỡng bảo vệ) ──────────────────────
+    // ── SafetyLimits (settings/safety_limits) ────────────────────
     LOG_DEBUG("SAFE",
         "Cutoff=%.1f EmgCool=%.1f | "
         "HtrMax=%lus HtrCool=%lus | "
-        "pHPulse=%lums pHInterval=%lums | "
+        "pHPulseMax=%lums pHInterval=%lums | "
         "Stale=%d",
         lim.thermal_cutoff_c, lim.temp_emergency_cool_c,
-        (unsigned long)(lim.heater_max_runtime_ms   / 1000),
-        (unsigned long)(lim.heater_cooldown_ms      / 1000),
-        (unsigned long)(lim.ph_pump_max_pulse_ms),
-        (unsigned long)(lim.ph_pump_min_interval_ms),
-        (int)lim.stale_sensor_threshold
-    );
+        (unsigned long)(lim.heater_max_runtime_ms    / 1000),
+        (unsigned long)(lim.heater_cooldown_ms       / 1000),
+        (unsigned long) lim.ph_pump_max_pulse_ms,
+        (unsigned long) lim.ph_pump_min_interval_ms,
+        (int)lim.stale_sensor_threshold);
 
-    // ── WaterChangeConfig ──────────────────────────────────────────
+    // ── AnalyticsConfig (settings/analytics_config) ──────────────
+    const AnalyticsConfig& acfg = analytics.getConfig();
+    LOG_DEBUG("ANA",
+        "EMA_alpha=%.3f | CUSUM k=%.2f thr=%.2f | "
+        "WSI w_T=%.2f w_TDS=%.2f | "
+        "FSI alpha=%.2f penalty=%.1f",
+        acfg.ema_alpha,
+        acfg.cusum_k, acfg.cusum_threshold,
+        acfg.wsi_weight_temp, acfg.wsi_weight_tds,
+        acfg.fsi_alpha, acfg.fsi_shock_penalty);
+
+    // ── WaterChangeConfig (settings/water_schedule) ───────────────
     LOG_DEBUG("WC",
         "Sched=%s %02d:%02d | PumpOut=%ds PumpIn=%ds",
         wc.schedule_enabled ? "ON" : "OFF",
         (int)wc.schedule_hour, (int)wc.schedule_minute,
-        (int)wc.pump_out_sec,  (int)wc.pump_in_sec
-    );
+        (int)wc.pump_out_sec,  (int)wc.pump_in_sec);
 
-    // ── SensorCalibration ──────────────────────────────────────────
+    // ── SensorCalibration (settings/calibration) ─────────────────
     const SensorCalibration& calib = configManager.getCalibration();
     LOG_DEBUG("CALIB",
         "pH: slope=%.4f offset=%.4f | TDS: factor=%.4f",
-        calib.ph_slope, calib.ph_offset, calib.tds_factor
-    );
+        calib.ph_slope, calib.ph_offset, calib.tds_factor);
 
     LOG_DEBUG("END DEBUG", "------------------------------------------------------------");
 }
@@ -229,25 +212,29 @@ void setup() {
     // Áp dụng pipeline config từ NVS vào dataPipeline
     dataPipeline.setConfig(configManager.getPipelineConfig());
 
-    // safetyCore.setBypass(true);  // test
-    safetyCore.setBypass(false); // production  
-    
-    // systemManager.setSafeModeBypass(true);  // test
-    systemManager.setSafeModeBypass(false); // production
+    // PhDoseController — apply config từ NVS + ControlConfig
+    phDoseCtrl.setControlConfig(configManager.getControlConfig());
+    // PhDoseConfig dùng default — có thể override từ Firebase sau
+
+    // PhSessionManager — begin sau phDoseCtrl đã có config
+    phSessionMgr.begin();
+
+    // safetyCore.setBypass(true);   // test
+    safetyCore.setBypass(false);     // production
+
+    // systemManager.setSafeModeBypass(true);   // test
+    systemManager.setSafeModeBypass(false);     // production
 
     LOG_INFO("MAIN", "setup() complete — entering loop()");
 }
 
 // ================================================================
-// LOOP — 18 bước tuần tự
+// LOOP — 18 bước tuần tự mỗi 5 giây
 // ================================================================
 void loop() {
     // ── BƯỚC 1: Đọc nút bấm + điều hướng menu ──────────────────
-    // LOG_DEBUG("LOOP", "step1 btn");
     buttonManager.update();
- 
-    // handleButtons() xử lý UP/DOWN/SELECT/BACK theo màn hình hiện tại
-    // Trả true khi user xác nhận thay nước qua menu
+
     if (oledDisplay.handleButtons()) {
         waterChangeManager.triggerManual();
         firebaseClient.notifyButtonTrigger();
@@ -255,15 +242,28 @@ void loop() {
     }
 
     // ── BƯỚC 2: System update (watchdog + safe mode check) ──────
-    // LOG_DEBUG("LOOP", "step2 sysupdate");
     systemManager.update(gClean, gAnalytics);
 
-    // ── BƯỚC 3: pH pulse timer (tắt relay khi hết thời gian) ───
-    // LOG_DEBUG("LOOP", "step3 phpulse");
-    tickPhPulse();
+    // ── BƯỚC 3: pH Session Manager update ───────────────────────
+    // Quản lý toàn bộ vòng đời session đo pH:
+    //   IDLE → SAFE_MODE_WAIT → COLLECTING → DOSING → IDLE
+    // Pulse bơm pH được xử lý non-blocking bên trong phSessionMgr.
+    // Trả true khi session vừa hoàn tất.
+    {
+        bool sessionDone = phSessionMgr.update();
+        if (sessionDone) {
+            // Session xong: log kết quả, Firebase sẽ upload trong bước 7
+            const PhDoseResult& dose = phSessionMgr.lastDoseResult();
+            LOG_INFO("MAIN",
+                "pH session done: median=%.3f pulse=%lums(%s)",
+                phSessionMgr.lastMedianPh(),
+                (unsigned long)dose.pulse_ms,
+                dose.ph_up   ? "UP"   :
+                dose.ph_down ? "DOWN" : "NONE");
+        }
+    }
 
     // ── BƯỚC 4: Water change state machine ──────────────────────
-    // LOG_DEBUG("LOOP", "step4 wc");
     {
         WaterChangeState wcBefore = waterChangeManager.getState();
         waterChangeManager.update();
@@ -274,22 +274,23 @@ void loop() {
         }
     }
 
+    // ── Safe mode: skip sensor + control pipeline ────────────────
+    // Khi PhSessionManager đang trong SAFE_MODE_WAIT / COLLECTING,
+    // systemManager.isSafeMode() == true → không điều khiển relay.
+    // Temp/TDS vẫn đọc và pipeline chạy bình thường (chỉ pH bị hold).
     if (systemManager.isSafeMode()) {
         goto step_firebase;
     }
 
 step_firebase:
     // ── BƯỚC 5: Serial config handler ───────────────────────────
-    // LOG_DEBUG("LOOP", "step5 serial");
     configManager.handleSerial();
 
     // ── BƯỚC 6: WiFi loop (reconnect) ───────────────────────────
-    // LOG_DEBUG("LOOP", "step6 wifi");
     gWifiConnected = wifiManager.isConnected();
     wifiManager.loop();
 
     // ── BƯỚC 7: Firebase loop (stream + upload mỗi 5s) ──────────
-    // LOG_DEBUG("LOOP", "step7 firebase");
     firebaseClient.loop(
         gClean,
         gAnalytics,
@@ -299,7 +300,6 @@ step_firebase:
     );
 
     // ── BƯỚC 8: OLED render (throttle 500ms) ────────────────────
-    // LOG_DEBUG("LOOP", "step8 oled");
     oledDisplay.update(
         gClean,
         gAnalytics,
@@ -309,11 +309,9 @@ step_firebase:
         systemManager.isSafeMode()
     );
 
-    // ── BƯỚC 9: Đọc sensor (mỗi 5 giây) ────────────────────────
-    // LOG_DEBUG("LOOP", "step9 sensor");
+    // ── BƯỚC 9: Đọc sensor (mỗi 5 giây) ─────────────────────────
     bool newSample = readSensors();
     if (!newSample) {
-        // Chưa đến chu kỳ → yield và thoát sớm
         delay(10);
         return;
     }
@@ -327,7 +325,7 @@ step_firebase:
 
     // ── BƯỚC 11: Lưu lịch sử ────────────────────────────────────
     cleanBuffer.push(clean);
-    gClean = clean;  // Cập nhật global để OLED + system check dùng
+    gClean = clean;
 
     // ── BƯỚC 12: Analytics ──────────────────────────────────────
     analytics.update(cleanBuffer);
@@ -345,13 +343,11 @@ step_firebase:
     cmd.allOff();
     hysteresisCtrl.compute(clean, cmd);
 
-    // ── BƯỚC 14: PID controller (pH) ─────────────────────────── 
-    pidCtrl.compute(clean, cmd, SENSOR_READ_INTERVAL_MS);
-
-    // Nếu PID tính ra pulse pH → khởi động pulse timer
-    if ((cmd.ph_up || cmd.ph_down) && pidCtrl.pulseDurationMs() > 0) {
-        startPhPulse(cmd.ph_up, cmd.ph_down, pidCtrl.pulseDurationMs());
-    }
+    // ── BƯỚC 14: pH — KHÔNG dùng PID nữa ────────────────────────
+    // PhSessionManager tự quản lý pulse relay pH bên trong.
+    // Trong chu kỳ 5 giây bình thường, pH pump KHÔNG được điều khiển
+    // ở đây. Chỉ khi session DOSING mới bật bơm (trong phSessionMgr).
+    // cmd.ph_up và cmd.ph_down giữ nguyên false từ allOff().
 
     // ── BƯỚC 15: Merge lệnh pump từ WaterChangeManager ──────────
     {
@@ -364,9 +360,6 @@ step_firebase:
     // ── BƯỚC 16: Safety check (7 tầng tuần tự) ──────────────────
     SafetyEvent evt = safetyCore.apply(cmd, clean);
 
-    // Push safety event lên Firebase chỉ khi có event MỚI thực sự.
-    // Không update gPrevSafetyEvt khi evt=NONE — giữ nguyên event cũ
-    // để tránh gửi lại cùng 1 event sau khi có 1 chu kỳ NONE xen giữa.
     if (evt != SafetyEvent::NONE) {
         if (evt != gPrevSafetyEvt) {
             firebaseClient.pushSafetyEvent(evt);
@@ -379,5 +372,4 @@ step_firebase:
 
     // ── BƯỚC 18: Debug print ─────────────────────────────────────
     debugPrintCycle(clean, gAnalytics, cmd, evt);
-    
 }
