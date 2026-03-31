@@ -161,20 +161,37 @@ bool readSensors() {
 // READ PH ONCE — đọc 1 mẫu pH duy nhất
 //
 // Chỉ gọi từ PhSessionManager khi đang COLLECTING (relay tắt hết).
-// Lấy trung bình 16 mẫu ADC để giảm nhiễu lượng tử.
+// Lấy median 16 mẫu ADC để loại bỏ spike/nhiễu xung — tốt hơn average
+// vì average vẫn bị kéo lệch bởi outlier, median thì không.
 // Không push vào rawSensorBuffer — trả về giá trị thô cho session tự xử lý.
 // ================================================================
 float readPhOnce() {
-    // 16 mẫu ADC, delay nhỏ giữa các lần để tránh nhiễu chuyển mạch ADC
-    int32_t sum = 0;
-    for (int i = 0; i < 16; i++) {
-        sum += analogRead(PIN_PH_ADC);
+    // Thu 16 mẫu ADC, delay nhỏ giữa các lần để tránh nhiễu chuyển mạch
+    static constexpr int PH_ADC_SAMPLES = 16;
+    int32_t buf[PH_ADC_SAMPLES];
+    for (int i = 0; i < PH_ADC_SAMPLES; i++) {
+        buf[i] = analogRead(PIN_PH_ADC);
         delayMicroseconds(200);
     }
-    float voltage = _adcToVoltage((float)(sum / 16));
+
+    // Insertion sort (nhanh với mảng nhỏ, không dùng heap)
+    for (int i = 1; i < PH_ADC_SAMPLES; i++) {
+        int32_t key = buf[i];
+        int j = i - 1;
+        while (j >= 0 && buf[j] > key) {
+            buf[j + 1] = buf[j];
+            j--;
+        }
+        buf[j + 1] = key;
+    }
+
+    // Median của 16 mẫu (chẵn) = trung bình 2 phần tử giữa
+    int32_t medianAdc = (buf[PH_ADC_SAMPLES / 2 - 1] + buf[PH_ADC_SAMPLES / 2]) / 2;
+
+    float voltage = _adcToVoltage((float)medianAdc);
     float ph      = _voltageToPh(voltage);
-    LOG_DEBUG("SENSOR", "readPhOnce: adc=%d V=%.4f pH=%.3f",
-              (int)(sum / 16), voltage, ph);
+    LOG_DEBUG("SENSOR", "readPhOnce: median_adc=%d V=%.4f pH=%.3f",
+              (int)medianAdc, voltage, ph);
     return ph;
 }
 

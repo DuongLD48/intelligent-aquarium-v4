@@ -172,6 +172,9 @@ bool PhSessionManager::update() {
         // Thoát safe mode để heater/cooler hoạt động lại
         systemManager.exitSafeMode();
 
+        // Reset sensor_error flag (session thành công)
+        firebaseClient.clearPhSensorErrorFlag();
+
         _enterState(PhSessionState::IDLE);
         return true;  // ← Báo main.cpp session hoàn tất
     }

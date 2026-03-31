@@ -104,6 +104,7 @@ public:
 
     // pH session events — gọi từ PhSessionManager
     void logPhSensorError(float spread, float threshold, uint8_t samples);
+    void clearPhSensorErrorFlag();
     void logPhShockEvent (float phBefore, float phAfter, float delta);
 
     void notifyButtonTrigger();
@@ -125,6 +126,7 @@ private:
 
     // Rising edge tracking (chỉ còn temp — pH shock log từ PhSessionManager)
     bool _prevShockTemp;
+    bool _phSensorError;   // true khi session NOISY, reset sau session thành công
 
     // History dedup — chỉ ghi field nếu giá trị thay đổi
     float _prevHistTemp;

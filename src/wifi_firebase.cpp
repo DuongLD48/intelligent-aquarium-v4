@@ -145,6 +145,7 @@ AquaFirebaseClient::AquaFirebaseClient()
     : _ready(false), _lastUploadMs(0), _lastHistoryMs(0),
       _lastSettingsStreamMs(0), _lastTriggerStreamMs(0),
       _prevShockTemp(false),
+      _phSensorError(false),
       _prevHistTemp(NAN), _prevHistTds(NAN), _prevHistPh(NAN) {}
 
 // ================================================================
@@ -317,12 +318,14 @@ String AquaFirebaseClient::_buildPhSessionJson() {
     const PhDoseConfig& cfg  = phDoseCtrl.getDoseConfig();
     float medPh = phSessionMgr.lastMedianPh();
 
-    // Buffer riêng để tránh aliasing với buffer b bên dưới
     char phBuf[12];
     if (isnan(medPh)) snprintf(phBuf, sizeof(phBuf), "null");
     else              snprintf(phBuf, sizeof(phBuf), "%.1f", medPh);
 
-    char b[320];
+    // sensor_error nằm trong object ph_session — ghi cùng object, không bao giờ bị xóa
+    const char* sensorErr = _phSensorError ? "\"true\"" : "\"false\"";
+
+    char b[380];
     snprintf(b, sizeof(b),
         "{\"state\":\"%s\""
         ",\"next_session_s\":%lu"
@@ -333,7 +336,8 @@ String AquaFirebaseClient::_buildPhSessionJson() {
         ",\"last_overshoot\":%.3f"
         ",\"measure_interval_s\":%lu"
         ",\"session_duration_s\":%lu"
-        ",\"warmup_s\":%lu}",
+        ",\"warmup_s\":%lu"
+        ",\"sensor_error\":%s}",
         phSessionMgr.stateStr(),
         (unsigned long)phSessionMgr.secondsUntilNextSession(),
         phBuf,
@@ -343,7 +347,8 @@ String AquaFirebaseClient::_buildPhSessionJson() {
         dose.overshoot,
         (unsigned long)(cfg.measure_interval_ms / 1000),
         (unsigned long)(cfg.session_duration_ms / 1000),
-        (unsigned long)(cfg.warmup_ms / 1000));
+        (unsigned long)(cfg.warmup_ms / 1000),
+        sensorErr);
     return String(b);
 }
 
@@ -366,6 +371,9 @@ void AquaFirebaseClient::_uploadHistory(const CleanReading& c) {
     bool tdsChanged  = isnan(_prevHistTds)  || fabsf(c.tds         - _prevHistTds)  > 0.1f;
     bool phChanged   = !isnan(ph) &&
                        (isnan(_prevHistPh)  || fabsf(ph            - _prevHistPh)   > 0.001f);
+
+    // Không có field nào thay đổi → skip, không ghi node rỗng
+    if (!tempChanged && !tdsChanged && !phChanged) return;
 
     // Build JSON chỉ với field thay đổi (timestamp luôn có)
     char body[128];
@@ -416,21 +424,27 @@ void AquaFirebaseClient::_uploadShockEvents(const CleanReading& c) {
 // ================================================================
 // PH SESSION EVENT LOGGERS — gọi từ PhSessionManager
 // ================================================================
-void AquaFirebaseClient::logPhSensorError(float spread, float threshold, uint8_t samples) {
-    if (!_ready || !wifiManager.isConnected()) return;
-    time_t now = time(nullptr);
-    if (now < 1700000000L) return;
+void AquaFirebaseClient::clearPhSensorErrorFlag() {
+    if (!_phSensorError) return;
+    _phSensorError = false;
+    // Ghi ngay để dashboard biết lỗi đã qua
+    String json = _buildPhSessionJson();
+    Database.set<object_t>(aClient, DB_PATH("ph_session"),
+                           object_t(json.c_str()), onUploadResult, "upPhSessOk");
+    LOG_INFO("FB", "pH sensor_error cleared");
+}
 
-    char path[96], body[128];
-    snprintf(path, sizeof(path),
-        DB_ROOT "/ph_session/sensor_error/%ld", (long)now);
-    snprintf(body, sizeof(body),
-        "{\"spread\":%.3f,\"threshold\":%.3f,\"samples\":%d,\"is_read\":false}",
-        spread, threshold, (int)samples);
-    Database.set<object_t>(aClient, path, object_t(body), onUploadResult, "phNoisy");
+void AquaFirebaseClient::logPhSensorError(float spread, float threshold, uint8_t samples) {
+    _phSensorError = true;
+    // Ghi ngay lập tức — không chờ _uploadAll vì _uploadAll có thể reset về false trước
+    String json = _buildPhSessionJson();
+    Database.set<object_t>(aClient, DB_PATH("ph_session"),
+                           object_t(json.c_str()), onUploadResult, "upPhSessErr");
     LOG_WARNING("FB", "pH sensor_error: spread=%.3f threshold=%.3f samples=%d",
                 spread, threshold, (int)samples);
 }
+
+
 
 void AquaFirebaseClient::logPhShockEvent(float phBefore, float phAfter, float delta) {
     if (!_ready || !wifiManager.isConnected()) return;
