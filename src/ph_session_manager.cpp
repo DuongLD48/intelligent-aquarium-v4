@@ -18,6 +18,13 @@
 //
 // State machine vòng đời session đo pH:
 //   IDLE → SAFE_MODE_WAIT → COLLECTING → DOSING → IDLE
+//
+// [FIX v4.1] Sửa bug _lastMedian bị đóng băng gây báo biến động
+//            đột ngột (shock) liên tiếp sai:
+//   - NOISY streak >= 3 → reset _lastMedian về NAN (xả đóng băng)
+//   - Biến động đột ngột lần 1 → chưa log Firebase, chờ xác nhận
+//   - Biến động đột ngột lần 2 liên tiếp → xác nhận thật, log + cập nhật _lastMedian
+//   - pH hồi phục giữa chừng → hủy cảnh báo, chấp nhận bình thường
 // ================================================================
 
 // Global singleton
@@ -29,9 +36,12 @@ PhSessionManager::PhSessionManager()
       _stateEnteredMs(0),
       _sampleCount(0),
       _lastSampleMs(0),
-      _lastMedianPh(7.0f),
+      _lastMedianPh(NAN),
       _lastSessionTs(0),
       _lastMedian(NAN),
+      _noisyStreak(0),
+      _shockStreak(0),
+      _pendingShockMedian(NAN),
       _pulseActive(false),
       _pulseOffAtMs(0),
       _phUpActive(false),
@@ -84,7 +94,7 @@ uint32_t PhSessionManager::secondsUntilNextSession() const {
 bool PhSessionManager::update() {
     uint32_t now = millis();
 
-    // Luôn tick pulse timer (active LOW relay)
+    // Luôn tick bộ đếm xung (relay active LOW)
     _tickPulse();
 
     switch (_state) {
@@ -104,7 +114,7 @@ bool PhSessionManager::update() {
 
     // ────────────────────────────────────────────────────────────
     case PhSessionState::SAFE_MODE_WAIT:
-    // Đã kích hoạt safe mode (trong _enterState).
+    // Đã kích hoạt chế độ an toàn (trong _enterState).
     // Bỏ toàn bộ mẫu trong warmup_ms đầu → không lấy gì.
     // Sau warmup_ms → chuyển sang COLLECTING.
     // ────────────────────────────────────────────────────────────
@@ -121,8 +131,8 @@ bool PhSessionManager::update() {
     // ────────────────────────────────────────────────────────────
     case PhSessionState::COLLECTING:
     // Đọc pH trực tiếp từ ADC mỗi 5 giây.
-    // KHÔNG dùng rawSensorBuffer — buffer đó chứa pH=NAN từ loop bình thường.
-    // readPhOnce() đọc ADC trực tiếp khi relay đã tắt (safe mode đang ON).
+    // KHÔNG dùng rawSensorBuffer — buffer đó chứa pH=NAN từ vòng lặp bình thường.
+    // readPhOnce() đọc ADC trực tiếp khi relay đã tắt (chế độ an toàn đang ON).
     // ────────────────────────────────────────────────────────────
     {
         uint32_t collectDuration = _cfg.session_duration_ms - _cfg.warmup_ms;
@@ -132,10 +142,9 @@ bool PhSessionManager::update() {
         if ((now - _lastSampleMs) >= SENSOR_READ_INTERVAL_MS
             && _sampleCount < PH_SESSION_MAX_SAMPLES)
         {
-            // Đọc pH trực tiếp từ ADC — relay tắt hết, không có nhiễu
             float ph = readPhOnce();
 
-            if (!isnan(ph) && ph >= 2.0f && ph <= 12.0f) {
+            if (!isnan(ph) && ph >= 3.0f && ph <= 10.0f) {
                 _samples[_sampleCount++] = ph;
                 LOG_INFO("PHSESS", "Sample[%d/%d] = %.3f (direct ADC, relay OFF)",
                          _sampleCount - 1, (int)PH_SESSION_MAX_SAMPLES, ph);
@@ -159,24 +168,19 @@ bool PhSessionManager::update() {
 
     // ────────────────────────────────────────────────────────────
     case PhSessionState::DOSING:
-    // Tính median → dose → thoát safe mode → trả về IDLE.
-    // Chạy 1 lần khi vừa vào state, pulse timer xử lý non-blocking.
+    // Chờ xung hoàn tất (non-blocking). Logic tính toán và quyết định
+    // bơm được thực hiện 1 lần duy nhất trong _enterState(DOSING).
     // ────────────────────────────────────────────────────────────
     {
-        // Chờ pulse hoàn tất (nếu đang chạy)
+        // Chờ xung hoàn tất (nếu đang chạy)
         if (_isPulseActive()) break;
 
-        // Pulse đã xong (hoặc không có) → về IDLE + thoát safe mode
+        // Xung đã xong (hoặc không có) → về IDLE + thoát chế độ an toàn
         LOG_INFO("PHSESS", "DOSING complete → exit safe mode → IDLE");
-
-        // Thoát safe mode để heater/cooler hoạt động lại
         systemManager.exitSafeMode();
-
-        // Reset sensor_error flag (session thành công)
         firebaseClient.clearPhSensorErrorFlag();
-
         _enterState(PhSessionState::IDLE);
-        return true;  // ← Báo main.cpp session hoàn tất
+        return true;
     }
 
     }  // end switch
@@ -185,7 +189,8 @@ bool PhSessionManager::update() {
 }
 
 // ================================================================
-// ENTER STATE — chuyển state + side effects
+// ENTER STATE — chuyển trạng thái + xử lý side effects
+// Với DOSING: toàn bộ logic kiểm tra nhiễu, biến động, bơm chạy ở đây
 // ================================================================
 void PhSessionManager::_enterState(PhSessionState s) {
     _state          = s;
@@ -199,14 +204,12 @@ void PhSessionManager::_enterState(PhSessionState s) {
         break;
 
     case PhSessionState::SAFE_MODE_WAIT:
-        // Kích hoạt safe mode: tất cả relay tắt
         systemManager.enterSafeMode();
-        LOG_INFO("PHSESS", "→ SAFE_MODE_WAIT (warm-up %lus, safe mode ON)",
+        LOG_INFO("PHSESS", "→ SAFE_MODE_WAIT (warm-up %lus, chế độ an toàn ON)",
                  (unsigned long)(_cfg.warmup_ms / 1000));
         break;
 
     case PhSessionState::COLLECTING:
-        // Reset sample buffer
         _sampleCount  = 0;
         _lastSampleMs = 0;
         memset(_samples, 0, sizeof(_samples));
@@ -217,19 +220,19 @@ void PhSessionManager::_enterState(PhSessionState s) {
 
     case PhSessionState::DOSING:
     {
-        // Tính median
+        // ── Không có mẫu → thoát sớm ───────────────────────────────
         if (_sampleCount == 0) {
-            LOG_WARNING("PHSESS", "DOSING: no samples collected — skip dose");
+            LOG_WARNING("PHSESS", "DOSING: no samples collected (all out of range) — sensor error");
+            firebaseClient.logPhSensorError(NAN, NAN, 0);  // Indicate all samples out of range
             _lastMedianPh = NAN;
             _lastDose     = PhDoseResult{};
-            // Thoát safe mode ngay
             systemManager.exitSafeMode();
             _state          = PhSessionState::IDLE;
             _stateEnteredMs = millis();
             return;
         }
 
-        // ── Bước 1: Noise check — max-min của _sampleCount mẫu ────
+        // ── Bước 1: Kiểm tra nhiễu — max-min của các mẫu ──────────
         float sMin = _samples[0], sMax = _samples[0];
         for (uint8_t i = 1; i < _sampleCount; i++) {
             if (_samples[i] < sMin) sMin = _samples[i];
@@ -238,11 +241,26 @@ void PhSessionManager::_enterState(PhSessionState s) {
         float spread = sMax - sMin;
 
         if (spread > _cfg.noise_threshold) {
-            // NOISY — log Firebase ph_session/sensor_error, skip dose → IDLE
-            LOG_WARNING("PHSESS", "NOISY: spread=%.3f > threshold=%.3f — skip dose",
-                        spread, _cfg.noise_threshold);
+            // NOISY — cảm biến nhiễu, không có dữ liệu đáng tin
+            _noisyStreak++;
+            _shockStreak        = 0;    // NOISY phá vỡ chuỗi nghi ngờ đang chờ
+            _pendingShockMedian = NAN;
+
+            LOG_WARNING("PHSESS",
+                "NOISY: spread=%.3f > threshold=%.3f — skip dose (noisyStreak=%d)",
+                spread, _cfg.noise_threshold, (int)_noisyStreak);
 
             firebaseClient.logPhSensorError(spread, _cfg.noise_threshold, _sampleCount);
+
+            // NOISY kéo dài >= 3 session liên tiếp → _lastMedian bị đóng băng quá lâu
+            // → reset về NAN để session tiếp theo luôn được chấp nhận (tránh báo động sai)
+            if (_noisyStreak >= 3) {
+                LOG_WARNING("PHSESS",
+                    "NOISY streak=%d >= 3 → reset _lastMedian (giải phóng tham chiếu đóng băng)",
+                    (int)_noisyStreak);
+                _lastMedian  = NAN;
+                _noisyStreak = 0;
+            }
 
             _lastDose = PhDoseResult{};
             systemManager.exitSafeMode();
@@ -251,25 +269,49 @@ void PhSessionManager::_enterState(PhSessionState s) {
             return;
         }
 
-        // ── Bước 2: Tính median ─────────────────────────────────────
-        float median = _calcMedian();
+        // ── Bước 2: Tính trung vị ──────────────────────────────────
+        float median   = _calcMedian();
         _lastSessionTs = time(nullptr);
+        _noisyStreak   = 0;  // Session hợp lệ → reset bộ đếm nhiễu
 
         LOG_INFO("PHSESS", "→ DOSING: %d samples, spread=%.3f, median pH=%.3f",
                  _sampleCount, spread, median);
 
-        // ── Bước 3: Shock check — so với session trước ─────────────
+        // ── Bước 3: Kiểm tra biến động đột ngột — so với session trước
         if (!isnan(_lastMedian)) {
             float delta = fabsf(median - _lastMedian);
             if (delta > _cfg.shock_threshold) {
-                // SHOCK — log Firebase history/shock_event_ph, skip dose → IDLE
-                LOG_WARNING("PHSESS", "SHOCK: |%.3f - %.3f| = %.3f > threshold=%.3f — skip dose",
-                            median, _lastMedian, delta, _cfg.shock_threshold);
+                _shockStreak++;
 
-                firebaseClient.logPhShockEvent(_lastMedian, median, delta);
+                if (_shockStreak == 1) {
+                    // Lần nghi ngờ đầu tiên: chưa log Firebase, chờ xác nhận.
+                    // Có thể là nhiễu ADC thoáng qua, không phải biến động thật.
+                    _pendingShockMedian = median;
+                    _lastMedianPh       = median;  // cập nhật hiển thị OLED/dashboard
 
-                _lastMedianPh = median;  // cập nhật để OLED/Firebase hiển thị
-                _lastDose     = PhDoseResult{};
+                    LOG_WARNING("PHSESS",
+                        "Nghi ngờ biến động đột ngột lần 1: |%.3f - %.3f| = %.3f > %.3f — chờ xác nhận",
+                        median, _lastMedian, delta, _cfg.shock_threshold);
+
+                } else {
+                    // Lần 2 trở đi: xác nhận biến động thật → log Firebase
+                    // ph_before dùng _lastMedian gốc (trước khi biến động bắt đầu)
+                    float phBefore = _lastMedian;
+
+                    LOG_WARNING("PHSESS",
+                        "Biến động đột ngột XÁC NHẬN (streak=%d): %.3f → %.3f — log Firebase",
+                        (int)_shockStreak, phBefore, median);
+
+                    firebaseClient.logPhShockEvent(phBefore, median, delta);
+
+                    // Cập nhật tham chiếu về giá trị pH thực tế hiện tại
+                    _lastMedian         = median;
+                    _lastMedianPh       = median;
+                    _pendingShockMedian = NAN;
+                    _shockStreak        = 0;
+                }
+
+                _lastDose = PhDoseResult{};
                 systemManager.exitSafeMode();
                 _state          = PhSessionState::IDLE;
                 _stateEnteredMs = millis();
@@ -277,32 +319,40 @@ void PhSessionManager::_enterState(PhSessionState s) {
             }
         }
 
-        // ── Bước 4: Accept — cập nhật _lastMedian, tiến hành dose ─
+        // pH trở về bình thường sau khi đang nghi ngờ → hủy cảnh báo
+        if (_shockStreak > 0) {
+            LOG_INFO("PHSESS",
+                "pH hồi phục sau %d session nghi ngờ (%.3f → %.3f) — hủy cảnh báo, chấp nhận",
+                (int)_shockStreak,
+                isnan(_pendingShockMedian) ? 0.0f : _pendingShockMedian,
+                median);
+            _shockStreak        = 0;
+            _pendingShockMedian = NAN;
+        }
+
+        // ── Bước 4: Chấp nhận — cập nhật _lastMedian, tiến hành bơm
         _lastMedian   = median;
         _lastMedianPh = median;
 
-        // Gọi PhDoseController
         _lastDose = phDoseCtrl.compute(_lastMedianPh);
 
-        // Khởi động pulse nếu có action
         if ((_lastDose.ph_up || _lastDose.ph_down) && _lastDose.pulse_ms > 0) {
             uint32_t maxPulse = safetyCore.getLimits().ph_pump_max_pulse_ms;
             uint32_t dur      = _lastDose.pulse_ms > maxPulse ? maxPulse : _lastDose.pulse_ms;
 
-            // Check ph_pump_min_interval trước khi bật relay
             if (safetyCore.checkPhPumpAllowed()) {
                 _startPulse(_lastDose.ph_up, _lastDose.ph_down, dur);
             } else {
-                LOG_WARNING("PHSESS", "DOSING: pH pump blocked by safety interval — skip pulse");
-                _lastDose.pulse_ms = 0;  // Clear để Firebase biết không có pulse
+                LOG_WARNING("PHSESS", "DOSING: bơm pH bị chặn bởi khoảng an toàn — skip pulse");
+                _lastDose.pulse_ms = 0;
             }
         } else {
-            LOG_INFO("PHSESS", "DOSING: deadzone — no pulse needed");
+            LOG_INFO("PHSESS", "DOSING: pH trong vùng hợp lệ — không cần bơm");
         }
         break;
     }
 
-    }
+    }  // end switch _enterState
 }
 
 // ================================================================
@@ -312,11 +362,10 @@ float PhSessionManager::_calcMedian() {
     if (_sampleCount == 0) return NAN;
     if (_sampleCount == 1) return _samples[0];
 
-    // Sao chép để không làm hỏng _samples
     float tmp[PH_SESSION_MAX_SAMPLES];
     memcpy(tmp, _samples, _sampleCount * sizeof(float));
 
-    // Sort bong bóng đơn giản (max 6 phần tử)
+    // Sắp xếp nổi bọt đơn giản (tối đa 6 phần tử)
     for (uint8_t i = 0; i < _sampleCount - 1; i++) {
         for (uint8_t j = 0; j < _sampleCount - 1 - i; j++) {
             if (tmp[j] > tmp[j + 1]) {
@@ -325,7 +374,6 @@ float PhSessionManager::_calcMedian() {
         }
     }
 
-    // Median: giữa nếu lẻ, trung bình 2 giữa nếu chẵn
     if (_sampleCount % 2 == 1) {
         return tmp[_sampleCount / 2];
     } else {
@@ -343,7 +391,6 @@ void PhSessionManager::_startPulse(bool phUp, bool phDown, uint32_t durationMs) 
     _phDownActive = phDown;
     _pulseOffAtMs = millis() + durationMs;
 
-    // Bật relay (active LOW = digitalWrite LOW)
     if (phUp)   digitalWrite(PIN_RELAY_PH_UP,   LOW);
     if (phDown) digitalWrite(PIN_RELAY_PH_DOWN, LOW);
 

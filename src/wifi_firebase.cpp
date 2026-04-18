@@ -23,6 +23,7 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <FirebaseClient.h>
+#include <esp_heap_caps.h>
 
 #include <time.h>
 #include <string.h>
@@ -38,7 +39,6 @@ using AsyncClient = AsyncClientClass;
 // ----------------------------------------------------------------
 static WiFiClientSecure ssl_upload;
 static WiFiClientSecure ssl_stream1;
-static WiFiClientSecure ssl_stream2;
 
 // ----------------------------------------------------------------
 // Firebase objects
@@ -49,12 +49,100 @@ static RealtimeDatabase Database;
 
 static AsyncClient aClient      (ssl_upload);
 static AsyncClient aClientStream1(ssl_stream1);
-static AsyncClient aClientStream2(ssl_stream2);
 
 // ----------------------------------------------------------------
 // Global pointer cho callbacks
 // ----------------------------------------------------------------
 static AquaFirebaseClient* _fbClient = nullptr;
+
+namespace {
+enum class SslErrorChannel : uint8_t {
+    Upload,
+    Stream
+};
+
+constexpr uint8_t kSslErrorWindowCapacity =
+    (FIREBASE_SSL_MEM_FAIL_UPLOAD_THRESHOLD > FIREBASE_SSL_MEM_FAIL_STREAM_THRESHOLD)
+        ? FIREBASE_SSL_MEM_FAIL_UPLOAD_THRESHOLD
+        : FIREBASE_SSL_MEM_FAIL_STREAM_THRESHOLD;
+
+struct SslErrorWindow {
+    const char* tag;
+    uint8_t threshold;
+    uint32_t timestamps[kSslErrorWindowCapacity];
+    uint8_t count;
+};
+
+SslErrorWindow g_uploadSslWindow = {"upload", FIREBASE_SSL_MEM_FAIL_UPLOAD_THRESHOLD, {0}, 0};
+SslErrorWindow g_streamSslWindow = {"stream", FIREBASE_SSL_MEM_FAIL_STREAM_THRESHOLD, {0}, 0};
+
+bool isSslMemoryAllocError(AsyncResult& r) {
+    const String& msg = r.error().message();
+    return r.error().code() == -32512 ||
+           msg.indexOf("Memory allocation failed") >= 0 ||
+           msg.indexOf("SSL - Memory allocation failed") >= 0;
+}
+
+uint32_t largestFreeBlockBytes() {
+    return heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+}
+
+void pruneSslErrorWindow(SslErrorWindow& window, uint32_t nowMs) {
+    uint8_t kept = 0;
+    for (uint8_t i = 0; i < window.count; ++i) {
+        uint32_t ts = window.timestamps[i];
+        if (nowMs - ts <= FIREBASE_SSL_MEM_FAIL_WINDOW_MS) {
+            window.timestamps[kept++] = ts;
+        }
+    }
+    window.count = kept;
+}
+
+void pushSslErrorTimestamp(SslErrorWindow& window, uint32_t nowMs) {
+    if (window.count < kSslErrorWindowCapacity) {
+        window.timestamps[window.count++] = nowMs;
+        return;
+    }
+
+    for (uint8_t i = 1; i < window.count; ++i) {
+        window.timestamps[i - 1] = window.timestamps[i];
+    }
+    window.timestamps[window.count - 1] = nowMs;
+}
+
+void handleSslMemoryAllocError(AsyncResult& r,
+                               SslErrorChannel channel,
+                               const char* sourceTag) {
+    if (!isSslMemoryAllocError(r)) return;
+
+    SslErrorWindow& window =
+        (channel == SslErrorChannel::Upload) ? g_uploadSslWindow : g_streamSslWindow;
+    uint32_t nowMs = millis();
+    pruneSslErrorWindow(window, nowMs);
+    pushSslErrorTimestamp(window, nowMs);
+
+    LOG_ERROR("FB",
+              "%s: SSL memory allocation failed [%s %u/%u in %lus], heap=%lu minHeap=%lu largest=%lu",
+              sourceTag,
+              window.tag,
+              (unsigned)window.count,
+              (unsigned)window.threshold,
+              (unsigned long)(FIREBASE_SSL_MEM_FAIL_WINDOW_MS / 1000UL),
+              (unsigned long)ESP.getFreeHeap(),
+              (unsigned long)ESP.getMinFreeHeap(),
+              (unsigned long)largestFreeBlockBytes());
+
+    if (window.count < window.threshold) return;
+
+    LOG_ERROR("FB",
+              "SSL memory allocation failed too often on %s (%u errors in %lus) -> reboot",
+              window.tag,
+              (unsigned)window.count,
+              (unsigned long)(FIREBASE_SSL_MEM_FAIL_WINDOW_MS / 1000UL));
+    delay(100);
+    ESP.restart();
+}
+}  // namespace
 
 // ----------------------------------------------------------------
 // Free-function callbacks
@@ -64,6 +152,8 @@ static void onUploadResult(AsyncResult& r) {
         LOG_WARNING("FB", "Upload err: %s (code=%d)",
                     r.error().message().c_str(),
                     r.error().code());
+        handleSslMemoryAllocError(r, SslErrorChannel::Upload, "Upload");
+        return;
     }
 }
 
@@ -72,6 +162,7 @@ static void onStream1Result(AsyncResult& r) {
     if (r.isError()) {
         LOG_WARNING("FB", "Stream1 err: %s (code=%d)",
                     r.error().message().c_str(), r.error().code());
+        handleSslMemoryAllocError(r, SslErrorChannel::Stream, "Stream1");
         return;
     }
     if (!r.available()) return;
@@ -81,19 +172,19 @@ static void onStream1Result(AsyncResult& r) {
     _fbClient->_onSettingsPayload(RTDB.dataPath().c_str(), r.c_str());
 }
 
-static void onStream2Result(AsyncResult& r) {
+static void onTriggerPollResult(AsyncResult& r) {
     if (!_fbClient) return;
     if (r.isError()) {
-        LOG_WARNING("FB", "Stream2 err: %s (code=%d)",
+        LOG_WARNING("FB", "Trigger poll err: %s (code=%d)",
                     r.error().message().c_str(), r.error().code());
+        _fbClient->_setTriggerPollPending(false);
+        handleSslMemoryAllocError(r, SslErrorChannel::Upload, "TriggerPoll");
         return;
     }
+    _fbClient->_setTriggerPollPending(false);
     if (!r.available()) return;
-    _fbClient->_lastTriggerStreamMs = millis();
     RealtimeDatabaseResult& RTDB = r.to<RealtimeDatabaseResult>();
-    if (RTDB.event() == "put" || RTDB.event() == "patch") {
-        _fbClient->_onTriggerPayload(RTDB.to<bool>());
-    }
+    _fbClient->_onTriggerPayload(RTDB.to<bool>());
 }
 
 // ================================================================
@@ -142,8 +233,9 @@ int  WiFiManager::rssi()        const { return WiFi.RSSI(); }
 AquaFirebaseClient firebaseClient;
 
 AquaFirebaseClient::AquaFirebaseClient()
-    : _ready(false), _lastUploadMs(0), _lastHistoryMs(0),
-      _lastSettingsStreamMs(0), _lastTriggerStreamMs(0),
+    : _lastSettingsStreamMs(0), _lastTriggerPollMs(0),
+      _ready(false), _lastUploadMs(0), _lastHistoryMs(0),
+      _triggerPollPending(false),
       _prevShockTemp(false),
       _phSensorError(false),
       _prevHistTemp(NAN), _prevHistTds(NAN), _prevHistPh(NAN) {}
@@ -157,21 +249,20 @@ void AquaFirebaseClient::begin() {
 
     ssl_upload.setInsecure();
     ssl_stream1.setInsecure();
-    ssl_stream2.setInsecure();
 
     initializeApp(aClient, app, getAuth(legacy_auth), onUploadResult, "authTask");
     app.getApp<RealtimeDatabase>(Database);
     Database.url(FIREBASE_URL);
 
     _startSettingsStream();
-    _startTriggerStream();
 
     _ready = true;
     uint32_t now          = millis();
     _lastUploadMs         = 0;
     _lastHistoryMs        = 0;
+    _triggerPollPending   = false;
     _lastSettingsStreamMs = now;
-    _lastTriggerStreamMs  = now;
+    _lastTriggerPollMs    = 0;
 
     LOG_INFO("FB", "Ready. Device=%s", FIREBASE_DEVICE);
 }
@@ -201,15 +292,21 @@ void AquaFirebaseClient::loop(
 
     if (now - _lastUploadMs >= FIREBASE_UPLOAD_INTERVAL_MS) {
         _lastUploadMs = now;
-        LOG_DEBUG("FB", "heap=%lu minHeap=%lu",
+        LOG_DEBUG("FB", "heap=%lu minHeap=%lu largest=%lu",
                   (unsigned long)ESP.getFreeHeap(),
-                  (unsigned long)ESP.getMinFreeHeap());
+                  (unsigned long)ESP.getMinFreeHeap(),
+                  (unsigned long)largestFreeBlockBytes());
         _uploadAll(clean, analyticsResult, relayState, lastSafetyEvent, safeMode);
     }
 
     if (now - _lastHistoryMs >= FIREBASE_HISTORY_INTERVAL_MS) {
         _lastHistoryMs = now;
         _uploadHistory(clean);
+    }
+
+    if (now - _lastTriggerPollMs >= FIREBASE_TRIGGER_POLL_INTERVAL_MS) {
+        _lastTriggerPollMs = now;
+        _pollTriggerState();
     }
 
     _uploadShockEvents(clean);
@@ -302,13 +399,14 @@ String AquaFirebaseClient::_buildRelayJson(const RelayCommand& cmd) {
 }
 
 String AquaFirebaseClient::_buildStatusJson(bool safeMode) {
-    char b[160];
+    char b[192];
     snprintf(b, sizeof(b),
-        "{\"uptime_s\":%lu,\"wifi_rssi\":%d,\"free_heap\":%lu"
+        "{\"uptime_s\":%lu,\"wifi_rssi\":%d,\"free_heap\":%lu,\"largest_block\":%lu"
         ",\"safe_mode\":%s}",
         (unsigned long)(millis() / 1000UL),
         wifiManager.rssi(),
         (unsigned long)ESP.getFreeHeap(),
+        (unsigned long)largestFreeBlockBytes(),
         safeMode ? "true" : "false");
     return String(b);
 }
@@ -365,10 +463,14 @@ void AquaFirebaseClient::_uploadHistory(const CleanReading& c) {
     if (now < 1700000000L) return;
 
     float ph = phSessionMgr.lastMedianPh();
+    bool tempValid = c.source_temperature != DataSource::FALLBACK_DEFAULT;
+    bool tdsValid  = c.source_tds         != DataSource::FALLBACK_DEFAULT;
 
     // Xác định field nào thay đổi (NAN = chưa có lần trước → luôn ghi)
-    bool tempChanged = isnan(_prevHistTemp) || fabsf(c.temperature - _prevHistTemp) > 0.01f;
-    bool tdsChanged  = isnan(_prevHistTds)  || fabsf(c.tds         - _prevHistTds)  > 0.1f;
+    bool tempChanged = tempValid &&
+                       (isnan(_prevHistTemp) || fabsf(c.temperature - _prevHistTemp) > 0.01f);
+    bool tdsChanged  = tdsValid &&
+                       (isnan(_prevHistTds)  || fabsf(c.tds         - _prevHistTds)  > 0.1f);
     bool phChanged   = !isnan(ph) &&
                        (isnan(_prevHistPh)  || fabsf(ph            - _prevHistPh)   > 0.001f);
 
@@ -440,8 +542,12 @@ void AquaFirebaseClient::logPhSensorError(float spread, float threshold, uint8_t
     String json = _buildPhSessionJson();
     Database.set<object_t>(aClient, DB_PATH("ph_session"),
                            object_t(json.c_str()), onUploadResult, "upPhSessErr");
-    LOG_WARNING("FB", "pH sensor_error: spread=%.3f threshold=%.3f samples=%d",
-                spread, threshold, (int)samples);
+    if (isnan(spread)) {
+        LOG_WARNING("FB", "pH sensor_error: all %d samples out of range", (int)samples);
+    } else {
+        LOG_WARNING("FB", "pH sensor_error: spread=%.3f > threshold=%.3f samples=%d",
+                    spread, threshold, (int)samples);
+    }
 }
 
 
@@ -499,10 +605,11 @@ void AquaFirebaseClient::_startSettingsStream() {
     LOG_INFO("FB", "Stream1: %s", DB_PATH("settings"));
 }
 
-void AquaFirebaseClient::_startTriggerStream() {
-    Database.get(aClientStream2, DB_PATH("water_change/manual_trigger"),
-        onStream2Result, true, "stream2");
-    LOG_INFO("FB", "Stream2: %s", DB_PATH("water_change/manual_trigger"));
+void AquaFirebaseClient::_pollTriggerState() {
+    if (_triggerPollPending) return;
+    _triggerPollPending = true;
+    Database.get(aClient, DB_PATH("water_change/manual_trigger"),
+        onTriggerPollResult, false, "pollTrig");
 }
 
 void AquaFirebaseClient::_checkStreamHealth() {
@@ -512,10 +619,10 @@ void AquaFirebaseClient::_checkStreamHealth() {
         _startSettingsStream();
         _lastSettingsStreamMs = now;
     }
-    if (now - _lastTriggerStreamMs > FIREBASE_STREAM_RETRY_MS) {
+    if (false) {
         LOG_WARNING("FB", "Stream2 stale → restart");
-        _startTriggerStream();
-        _lastTriggerStreamMs = now;
+        _pollTriggerState();
+        _lastTriggerPollMs = now;
     }
 }
 

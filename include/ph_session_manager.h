@@ -15,37 +15,36 @@
 //     IDLE
 //       │ countdown measure_interval_ms hết
 //       ▼
-//     SAFE_MODE_WAIT   ← kích hoạt safe mode (tắt tất cả relay)
-//       │ session_duration_ms hết
+//     SAFE_MODE_WAIT   ← kích hoạt chế độ an toàn (tắt tất cả relay)
+//       │ warmup_ms hết
 //       ▼
-//     COLLECTING       ← đọc mẫu pH mỗi 5s, bỏ warmup_ms đầu
+//     COLLECTING       ← đọc mẫu pH mỗi 5s
 //       │ session xong, có đủ mẫu
 //       ▼
-//     DOSING           ← tính median → PhDoseController.compute()
+//     DOSING           ← tính trung vị → PhDoseController.compute()
 //       │ pulse xong (hoặc không cần pulse)
 //       ▼
-//     IDLE             ← thoát safe mode, reset timer
+//     IDLE             ← thoát chế độ an toàn, reset timer
 //
 // Lưu ý:
 //   - Trong SAFE_MODE_WAIT và COLLECTING: systemManager.enterSafeMode()
-//     giữ tất cả relay tắt, sensor temp/TDS vẫn đọc bình thường.
-//   - pH samples được collect trực tiếp từ rawSensorBuffer mỗi 5s
-//     trong phase COLLECTING (sau warmup).
-//   - Median được tính từ tối đa 6 mẫu (30s / 5s).
+//     giữ tất cả relay tắt, cảm biến nhiệt độ/TDS vẫn đọc bình thường.
+//   - Mẫu pH được thu trực tiếp qua readPhOnce() mỗi 5s trong COLLECTING.
+//   - Trung vị tính từ tối đa 6 mẫu (30s / 5s).
 // ================================================================
 
 // ----------------------------------------------------------------
-// SESSION STATE
+// TRẠNG THÁI SESSION
 // ----------------------------------------------------------------
 enum class PhSessionState : uint8_t {
     IDLE             = 0,   // Chờ đến lượt đo
-    SAFE_MODE_WAIT   = 1,   // Đã vào safe mode, đang warm-up (bỏ mẫu)
+    SAFE_MODE_WAIT   = 1,   // Đã vào chế độ an toàn, đang làm ấm (bỏ mẫu)
     COLLECTING       = 2,   // Đang thu mẫu pH hợp lệ
-    DOSING           = 3,   // Đang chạy pulse bơm
+    DOSING           = 3,   // Đang chạy xung bơm
 };
 
 // ----------------------------------------------------------------
-// PH SESSION BUFFER — tối đa 6 mẫu trong 30s
+// BUFFER SESSION pH — tối đa 6 mẫu trong 30s
 // ----------------------------------------------------------------
 static constexpr size_t PH_SESSION_MAX_SAMPLES = 6;
 
@@ -63,13 +62,13 @@ public:
     // Trả về true nếu vừa hoàn tất 1 session (có giá trị pH mới)
     bool update();
 
-    // Lấy state hiện tại (để OLED / Firebase hiển thị)
+    // Lấy trạng thái hiện tại (để OLED / Firebase hiển thị)
     PhSessionState state() const { return _state; }
 
-    // pH median của session vừa xong (chỉ hợp lệ sau khi update() = true)
+    // pH trung vị của session vừa xong (chỉ hợp lệ sau khi update() = true)
     float lastMedianPh() const { return _lastMedianPh; }
 
-    // Kết quả dose của session vừa xong
+    // Kết quả bơm của session vừa xong
     const PhDoseResult& lastDoseResult() const { return _lastDose; }
 
     // Số giây còn lại đến session tiếp theo (để OLED hiển thị)
@@ -78,13 +77,13 @@ public:
     // Unix timestamp lần session cuối (cho Firebase ph_session/last_session_ts)
     time_t lastSessionTs() const { return _lastSessionTs; }
 
-    // Số mẫu đã thu trong COLLECTING — dùng cho debug print
+    // Số mẫu đã thu trong COLLECTING — dùng cho debug
     uint8_t sampleCount() const { return _sampleCount; }
 
     // Ép bắt đầu session ngay (từ web/Firebase trigger)
     void triggerNow();
 
-    // Cập nhật config (từ PhDoseConfig thay đổi runtime)
+    // Cập nhật cấu hình (từ PhDoseConfig thay đổi runtime)
     void setConfig(const PhDoseConfig& cfg);
 
     // Debug string
@@ -92,12 +91,12 @@ public:
 
 private:
     PhSessionState _state;
-    uint32_t       _stateEnteredMs;   // millis() khi vào state hiện tại
+    uint32_t       _stateEnteredMs;   // millis() khi vào trạng thái hiện tại
 
-    // Config (copy từ phDoseCtrl)
+    // Cấu hình (sao chép từ phDoseCtrl)
     PhDoseConfig   _cfg;
 
-    // Sample buffer trong phase COLLECTING
+    // Buffer mẫu trong pha COLLECTING
     float    _samples[PH_SESSION_MAX_SAMPLES];
     uint8_t  _sampleCount;
     uint32_t _lastSampleMs;  // millis() lần lấy mẫu gần nhất
@@ -107,17 +106,34 @@ private:
     PhDoseResult _lastDose;
     time_t       _lastSessionTs;  // Unix timestamp lần đo cuối
 
-    // lastMedian dùng để phát hiện shock giữa 2 session liên tiếp
-    // Chỉ lưu trong RAM — reset khi reboot
-    float        _lastMedian;     // NAN = chưa có session nào trước đó
+    // Tham chiếu so sánh giữa 2 session — phát hiện biến động đột ngột
+    // Chỉ lưu trong RAM — reset khi khởi động lại
+    float   _lastMedian;          // NAN = chưa có session nào trước đó
 
-    // pH pulse timer (non-blocking, dùng lại logic từ main)
+    // ── Bộ đếm streak để tránh false positive ───────────────────
+    //
+    // _noisyStreak: đếm session NOISY liên tiếp.
+    //   >= 3 → _lastMedian bị đóng băng quá lâu → reset về NAN
+    //          để session tiếp theo luôn được chấp nhận.
+    //
+    // _shockStreak: đếm session biến động đột ngột liên tiếp.
+    //   == 1 → nghi ngờ, chưa log Firebase, lưu vào _pendingShockMedian
+    //   >= 2 → xác nhận biến động thật → log Firebase + cập nhật _lastMedian
+    //
+    // _pendingShockMedian: trung vị của lần nghi ngờ đầu tiên (chờ xác nhận).
+    //   Nếu session sau trở về bình thường → hủy cảnh báo, không log.
+    //
+    uint8_t _noisyStreak;
+    uint8_t _shockStreak;
+    float   _pendingShockMedian;
+
+    // Bộ đếm xung bơm pH (non-blocking)
     bool     _pulseActive;
     uint32_t _pulseOffAtMs;
     bool     _phUpActive;
     bool     _phDownActive;
 
-    // Internal helpers
+    // Hàm nội bộ
     void   _enterState(PhSessionState s);
     float  _calcMedian();
     void   _startPulse(bool phUp, bool phDown, uint32_t durationMs);

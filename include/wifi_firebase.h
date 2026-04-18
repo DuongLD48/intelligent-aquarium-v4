@@ -56,7 +56,11 @@
 #define WIFI_RECONNECT_INTERVAL_MS    5000UL
 #define FIREBASE_UPLOAD_INTERVAL_MS  10000UL
 #define FIREBASE_HISTORY_INTERVAL_MS 60000UL
-#define FIREBASE_STREAM_RETRY_MS     60000UL
+#define FIREBASE_STREAM_RETRY_MS         60000UL
+#define FIREBASE_TRIGGER_POLL_INTERVAL_MS 5000UL
+#define FIREBASE_SSL_MEM_FAIL_WINDOW_MS   60000UL
+#define FIREBASE_SSL_MEM_FAIL_UPLOAD_THRESHOLD 8U
+#define FIREBASE_SSL_MEM_FAIL_STREAM_THRESHOLD 8U
 
 // ----------------------------------------------------------------
 // DB PATH HELPERS
@@ -115,7 +119,8 @@ public:
 
     // Semi-public: cho free-function callbacks truy cập
     uint32_t _lastSettingsStreamMs;
-    uint32_t _lastTriggerStreamMs;
+    uint32_t _lastTriggerPollMs;
+    void _setTriggerPollPending(bool pending) { _triggerPollPending = pending; }
     void _onSettingsPayload(const char* path, const char* data);
     void _onTriggerPayload (bool triggered);
 
@@ -123,6 +128,7 @@ private:
     bool     _ready;
     uint32_t _lastUploadMs;
     uint32_t _lastHistoryMs;
+    bool     _triggerPollPending;
 
     // Rising edge tracking (chỉ còn temp — pH shock log từ PhSessionManager)
     bool _prevShockTemp;
@@ -147,7 +153,7 @@ private:
     String _buildPhSessionJson  ();   // ← Mới: trạng thái pH session
 
     void _startSettingsStream();
-    void _startTriggerStream();
+    void _pollTriggerState();
     void _checkStreamHealth();
 
     void _notifyWebTrigger();
