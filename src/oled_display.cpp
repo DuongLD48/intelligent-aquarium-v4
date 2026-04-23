@@ -194,8 +194,8 @@ void OledDisplay::update(
 // ┌────────────────────────┐
 // │ AQUARIUM v4  [WiFi]    │
 // ├────────────────────────┤
-// │ T:26.2 pH:7.02 TDS:285 │
-// │ WC: IDLE               │
+// │ T:26.2 pH:7.02         │
+// │ TDS:285 WC:IDLE        │
 // ├────────────────────────┤
 // │ > [INFO]               │
 // │   [ACTIONS]            │
@@ -211,31 +211,47 @@ void OledDisplay::_renderHome() {
     }
     _display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
 
-    // Sensor summary line
+    // Sensor summary lines
     char buf[32];
+    float lastPh = phSessionMgr.lastMedianPh();
     if (_pClean) {
-        snprintf(buf, sizeof(buf), "T:%.1f TDS:%.0f",
-                 _pClean->temperature, _pClean->tds);
+        if (!isnan(lastPh)) {
+            snprintf(buf, sizeof(buf), "T:%.1f pH:%.2f",
+                     _pClean->temperature, lastPh);
+        } else {
+            snprintf(buf, sizeof(buf), "T:%.1f pH:--",
+                     _pClean->temperature);
+        }
     } else {
-        snprintf(buf, sizeof(buf), "T:-- TDS:--");
+        if (!isnan(lastPh)) {
+            snprintf(buf, sizeof(buf), "T:-- pH:%.2f", lastPh);
+        } else {
+            snprintf(buf, sizeof(buf), "T:-- pH:--");
+        }
     }
     _display.setCursor(0, 12);
     _display.print(buf);
 
-    // WC status
+    if (_pClean) {
+        snprintf(buf, sizeof(buf), "TDS:%.0f", _pClean->tds);
+    } else {
+        snprintf(buf, sizeof(buf), "TDS:--");
+    }
     _display.setCursor(0, 22);
+    _display.print(buf);
+
+    _display.setCursor(58, 22);
     _display.print("WC:");
     switch (_wcState) {
-        case WaterChangeState::IDLE:        _display.print("IDLE");      break;
-        case WaterChangeState::PUMPING_OUT: _display.print("PUMP OUT"); break;
-        case WaterChangeState::PUMPING_IN:  _display.print("PUMP IN");  break;
-        case WaterChangeState::DONE:        _display.print("DONE");      break;
+        case WaterChangeState::IDLE:        _display.print("IDLE"); break;
+        case WaterChangeState::PUMPING_OUT: _display.print("OUT");  break;
+        case WaterChangeState::PUMPING_IN:  _display.print("IN");   break;
+        case WaterChangeState::DONE:        _display.print("DONE"); break;
     }
 
-    // Safe mode warning
     if (_safeMode) {
-        _display.setCursor(72, 22);
-        _display.print("!!SAFE!!");
+        _display.setCursor(88, 22);
+        _display.print("SAFE");
     }
 
     _display.drawLine(0, 32, 127, 32, SSD1306_WHITE);

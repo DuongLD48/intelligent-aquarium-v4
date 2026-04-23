@@ -30,7 +30,7 @@
 //   - Trong SAFE_MODE_WAIT và COLLECTING: systemManager.enterSafeMode()
 //     giữ tất cả relay tắt, cảm biến nhiệt độ/TDS vẫn đọc bình thường.
 //   - Mẫu pH được thu trực tiếp qua readPhOnce() mỗi 5s trong COLLECTING.
-//   - Trung vị tính từ tối đa 6 mẫu (30s / 5s).
+//   - Session hợp lệ cần đủ 6 mẫu; sau đó bỏ min/max và tính trên 4 mẫu giữa.
 // ================================================================
 
 // ----------------------------------------------------------------
@@ -100,6 +100,8 @@ private:
     float    _samples[PH_SESSION_MAX_SAMPLES];
     uint8_t  _sampleCount;
     uint32_t _lastSampleMs;  // millis() lần lấy mẫu gần nhất
+    float    _sessionLowPassPh;
+    bool     _sessionLowPassPrimed;
 
     // Kết quả session
     float        _lastMedianPh;
@@ -135,7 +137,8 @@ private:
 
     // Hàm nội bộ
     void   _enterState(PhSessionState s);
-    float  _calcMedian();
+    bool   _calcTrimmedStats(float& median, float& spread);
+    float  _applySessionLowPass(float rawPh);
     void   _startPulse(bool phUp, bool phDown, uint32_t durationMs);
     void   _tickPulse();
     bool   _isPulseActive() const { return _pulseActive; }

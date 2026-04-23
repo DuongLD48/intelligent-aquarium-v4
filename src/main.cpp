@@ -360,6 +360,12 @@ step_firebase:
     // ── BƯỚC 16: Safety check (7 tầng tuần tự) ──────────────────
     SafetyEvent evt = safetyCore.apply(cmd, clean);
 
+    LOG_DEBUG("SAFETY_SUMMARY",
+        "apply evt=%s | H=%d C=%d pHU=%d pHD=%d pIn=%d pOut=%d",
+        safetyEventToString(evt),
+        cmd.heater, cmd.cooler, cmd.ph_up, cmd.ph_down,
+        cmd.pump_in, cmd.pump_out);
+
     if (evt != SafetyEvent::NONE) {
         if (evt != gPrevSafetyEvt) {
             firebaseClient.pushSafetyEvent(evt);

@@ -89,6 +89,7 @@ void sensor_manager_init() {
     } else {
         LOG_INFO("SENSOR", "DS18B20 found: %d device(s)", count);
     }
+    analogSetWidth(12);
     analogSetAttenuation(ADC_11db);
     _initialized = true;
     LOG_INFO("SENSOR", "Sensor manager init OK");
@@ -166,32 +167,22 @@ bool readSensors() {
 // Không push vào rawSensorBuffer — trả về giá trị thô cho session tự xử lý.
 // ================================================================
 float readPhOnce() {
-    // Thu 16 mẫu ADC, delay nhỏ giữa các lần để tránh nhiễu chuyển mạch
-    static constexpr int PH_ADC_SAMPLES = 16;
-    int32_t buf[PH_ADC_SAMPLES];
+    // Thu 50 mẫu ADC, trung bình cộng để giảm nhiễu
+    static constexpr int PH_ADC_SAMPLES = 50;
+    static constexpr uint32_t PH_ADC_SAMPLE_GAP_MS = 5;
+    int32_t sum = 0;
     for (int i = 0; i < PH_ADC_SAMPLES; i++) {
-        buf[i] = analogRead(PIN_PH_ADC);
-        delayMicroseconds(200);
+        sum += analogRead(PIN_PH_ADC);
+        delay(PH_ADC_SAMPLE_GAP_MS);
     }
 
-    // Insertion sort (nhanh với mảng nhỏ, không dùng heap)
-    for (int i = 1; i < PH_ADC_SAMPLES; i++) {
-        int32_t key = buf[i];
-        int j = i - 1;
-        while (j >= 0 && buf[j] > key) {
-            buf[j + 1] = buf[j];
-            j--;
-        }
-        buf[j + 1] = key;
-    }
+    // Trung bình cộng của 50 mẫu
+    int32_t avgAdc = sum / PH_ADC_SAMPLES;
 
-    // Median của 16 mẫu (chẵn) = trung bình 2 phần tử giữa
-    int32_t medianAdc = (buf[PH_ADC_SAMPLES / 2 - 1] + buf[PH_ADC_SAMPLES / 2]) / 2;
-
-    float voltage = _adcToVoltage((float)medianAdc);
+    float voltage = _adcToVoltage((float)avgAdc);
     float ph      = _voltageToPh(voltage);
-    LOG_DEBUG("SENSOR", "readPhOnce: median_adc=%d V=%.4f pH=%.3f",
-              (int)medianAdc, voltage, ph);
+    LOG_DEBUG("SENSOR", "readPhOnce: avg_adc=%d V=%.4f pH=%.3f",
+              (int)avgAdc, voltage, ph);
     return ph;
 }
 

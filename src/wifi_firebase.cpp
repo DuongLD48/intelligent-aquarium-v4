@@ -543,7 +543,8 @@ void AquaFirebaseClient::logPhSensorError(float spread, float threshold, uint8_t
     Database.set<object_t>(aClient, DB_PATH("ph_session"),
                            object_t(json.c_str()), onUploadResult, "upPhSessErr");
     if (isnan(spread)) {
-        LOG_WARNING("FB", "pH sensor_error: all %d samples out of range", (int)samples);
+        LOG_WARNING("FB", "pH sensor_error: only %d/%d valid samples",
+                    (int)samples, (int)threshold);
     } else {
         LOG_WARNING("FB", "pH sensor_error: spread=%.3f > threshold=%.3f samples=%d",
                     spread, threshold, (int)samples);

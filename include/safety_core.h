@@ -167,5 +167,7 @@ private:
     static uint8_t _relayPin(RelayIndex idx);
 };
 
+const char* safetyEventToString(SafetyEvent evt);
+
 // Global singleton
 extern SafetyCore safetyCore;

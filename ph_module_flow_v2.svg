@@ -1,0 +1,240 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="3850" viewBox="0 0 1600 3850">
+  <defs>
+    <style>
+      .bg { fill: #f8fafc; }
+      .box { fill: #ffffff; stroke: #334155; stroke-width: 3; rx: 22; ry: 22; }
+      .calc { fill: #eff6ff; stroke: #2563eb; stroke-width: 3; rx: 22; ry: 22; }
+      .ok { fill: #ecfdf5; stroke: #059669; stroke-width: 3; rx: 22; ry: 22; }
+      .warn { fill: #fff7ed; stroke: #c2410c; stroke-width: 3; rx: 22; ry: 22; }
+      .fail { fill: #fff1f2; stroke: #be123c; stroke-width: 3; rx: 22; ry: 22; }
+      .note { fill: #f8fafc; stroke: #94a3b8; stroke-width: 2.5; stroke-dasharray: 10 8; rx: 18; ry: 18; }
+      .decision { fill: #ffffff; stroke: #334155; stroke-width: 3; }
+      .title { font: 700 28px 'Segoe UI', Arial, sans-serif; fill: #0f172a; text-anchor: middle; }
+      .subtitle { font: 500 16px 'Segoe UI', Arial, sans-serif; fill: #475569; text-anchor: middle; }
+      .label { font: 700 20px 'Segoe UI', Arial, sans-serif; fill: #0f172a; text-anchor: middle; }
+      .small { font: 500 17px 'Segoe UI', Arial, sans-serif; fill: #334155; text-anchor: middle; }
+      .tiny { font: 500 15px 'Segoe UI', Arial, sans-serif; fill: #475569; text-anchor: middle; }
+      .yesno { font: 700 17px 'Segoe UI', Arial, sans-serif; fill: #334155; }
+      .arrow { stroke: #475569; stroke-width: 4; fill: none; stroke-linecap: round; stroke-linejoin: round; marker-end: url(#m); }
+    </style>
+    <marker id="m" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M0,0 L12,6 L0,12 z" fill="#475569"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1600" height="3850"/>
+
+  <text class="title" x="800" y="58">SO DO MAY TRANG THAI MO-DUN DIEU KHIEN pH</text>
+  <text class="subtitle" x="800" y="88">Phien do doc lap - safe mode - low-pass theo tung phien - trim 6 mau con 4 - dual-confirm shock</text>
+
+  <!-- main state column -->
+  <rect class="box" x="590" y="130" width="420" height="90"/>
+  <text class="label" x="800" y="170">IDLE</text>
+  <text class="small" x="800" y="198">Cho den ky do tiep theo</text>
+
+  <polygon class="decision" points="800,280 940,410 800,540 660,410"/>
+  <text class="label" x="800" y="392">Den lich do</text>
+  <text class="label" x="800" y="420">hoac triggerNow?</text>
+
+  <polygon class="decision" points="1140,320 1290,410 1140,500 990,410"/>
+  <text class="label" x="1140" y="404">Water</text>
+  <text class="label" x="1140" y="432">change busy?</text>
+
+  <rect class="warn" x="1260" y="335" width="250" height="120"/>
+  <text class="label" x="1385" y="374">DELAY SESSION</text>
+  <text class="small" x="1385" y="404">Khong vao phien do</text>
+  <text class="small" x="1385" y="430">Tiep tuc cho o IDLE</text>
+
+  <rect class="box" x="1060" y="580" width="380" height="120"/>
+  <text class="label" x="1250" y="620">SAFE_MODE_WAIT</text>
+  <text class="small" x="1250" y="650">enterSafeMode() - tat tat ca relay</text>
+  <text class="small" x="1250" y="676">Cho warmup de nhieu tan bien</text>
+
+  <polygon class="decision" points="1250,760 1380,880 1250,1000 1120,880"/>
+  <text class="label" x="1250" y="862">Het warmup?</text>
+  <text class="tiny" x="1250" y="890">Mac dinh 30 giay</text>
+
+  <rect class="box" x="590" y="820" width="420" height="130"/>
+  <text class="label" x="800" y="860">COLLECTING</text>
+  <text class="small" x="800" y="890">Doc pH truc tiep tu ADC moi 5 giay</text>
+  <text class="small" x="800" y="916">Khong dung rawSensorBuffer</text>
+  <text class="small" x="800" y="942">Toi da 6 mau trong pha collect</text>
+
+  <rect class="calc" x="120" y="820" width="360" height="160"/>
+  <text class="label" x="300" y="860">LOW-PASS THEO PHIEN</text>
+  <text class="small" x="300" y="892">Moi mau raw di qua EMA</text>
+  <text class="small" x="300" y="920">filtered = prev + alpha x (raw - prev)</text>
+  <text class="small" x="300" y="948">alpha = 0.40</text>
+  <text class="tiny" x="300" y="974">Mau dau tien dung truc tiep va reset moi khi vao COLLECTING</text>
+
+  <polygon class="decision" points="800,1040 940,1170 800,1300 660,1170"/>
+  <text class="label" x="800" y="1152">Du 6 mau</text>
+  <text class="label" x="800" y="1180">hoac het thoi gian?</text>
+
+  <rect class="calc" x="590" y="1360" width="420" height="90"/>
+  <text class="label" x="800" y="1400">DOSING / TINH TOAN</text>
+  <text class="small" x="800" y="1428">Bat dau cac nhanh kiem tra tuan tu</text>
+
+  <polygon class="decision" points="800,1510 940,1640 800,1770 660,1640"/>
+  <text class="label" x="800" y="1622">Du 6 mau hop le?</text>
+  <text class="tiny" x="800" y="1650">_sampleCount &gt;= 6</text>
+
+  <rect class="fail" x="140" y="1570" width="360" height="120"/>
+  <text class="label" x="320" y="1610">SENSOR ERROR</text>
+  <text class="small" x="320" y="1640">Khong du 6 mau hop le</text>
+  <text class="small" x="320" y="1666">logPhSensorError()</text>
+
+  <rect class="calc" x="590" y="1830" width="420" height="140"/>
+  <text class="label" x="800" y="1870">TRIMMED STATS</text>
+  <text class="small" x="800" y="1900">Sap xep 6 mau da loc</text>
+  <text class="small" x="800" y="1926">Bo 1 min + 1 max</text>
+  <text class="small" x="800" y="1952">Giu 4 mau giua de tinh spread va median</text>
+
+  <polygon class="decision" points="800,2030 940,2160 800,2290 660,2160"/>
+  <text class="label" x="800" y="2142">Spread cua 4 mau giua</text>
+  <text class="label" x="800" y="2170">&gt; noise threshold?</text>
+
+  <rect class="warn" x="1080" y="2090" width="390" height="140"/>
+  <text class="label" x="1275" y="2130">NOISY</text>
+  <text class="small" x="1275" y="2160">logPhSensorError(spread)</text>
+  <text class="small" x="1275" y="2186">Tang noisyStreak</text>
+  <text class="small" x="1275" y="2212">Neu streak &gt;= 3 thi reset _lastMedian</text>
+
+  <rect class="calc" x="590" y="2370" width="420" height="110"/>
+  <text class="label" x="800" y="2410">pH DAI DIEN CUA PHIEN</text>
+  <text class="small" x="800" y="2440">Median = trung binh 2 phan tu giua cua 4 mau</text>
+  <text class="small" x="800" y="2466">Dung cho shock check va tinh luong bom</text>
+
+  <polygon class="decision" points="800,2540 940,2670 800,2800 660,2670"/>
+  <text class="label" x="800" y="2650">Shock voi phien truoc?</text>
+  <text class="tiny" x="800" y="2678">lastMedian co san va |delta| &gt; shock threshold</text>
+
+  <polygon class="decision" points="1120,2580 1230,2670 1120,2760 1010,2670"/>
+  <text class="label" x="1120" y="2664">Lan nghi ngo</text>
+  <text class="label" x="1120" y="2692">dau tien?</text>
+
+  <rect class="warn" x="1260" y="2540" width="250" height="120"/>
+  <text class="label" x="1385" y="2580">PENDING SHOCK</text>
+  <text class="small" x="1385" y="2610">Chua log Firebase</text>
+  <text class="small" x="1385" y="2636">Luu median nghi ngo, ve IDLE</text>
+
+  <rect class="warn" x="1260" y="2690" width="250" height="130"/>
+  <text class="label" x="1385" y="2730">CONFIRMED SHOCK</text>
+  <text class="small" x="1385" y="2760">logPhShockEvent()</text>
+  <text class="small" x="1385" y="2786">Cap nhat reference, ve IDLE</text>
+
+  <rect class="note" x="100" y="2480" width="380" height="150"/>
+  <text class="label" x="290" y="2520">RECOVERY CASE</text>
+  <text class="small" x="290" y="2550">Neu phien truoc dang pending shock</text>
+  <text class="small" x="290" y="2576">nhung phien nay tro lai binh thuong</text>
+  <text class="small" x="290" y="2602">thi clear pending va tiep tuc chap nhan</text>
+
+  <polygon class="decision" points="800,2860 940,2990 800,3120 660,2990"/>
+  <text class="label" x="800" y="2972">pH trong vung</text>
+  <text class="label" x="800" y="3000">[ph_min, ph_max]?</text>
+
+  <rect class="ok" x="1060" y="2930" width="280" height="100"/>
+  <text class="label" x="1200" y="2970">KHONG BOM</text>
+  <text class="small" x="1200" y="2998">Ve IDLE ngay</text>
+
+  <rect class="calc" x="120" y="2890" width="380" height="150"/>
+  <text class="label" x="310" y="2930">TINH LUONG BOM</text>
+  <text class="small" x="310" y="2960">pulse = base + slope x overshoot</text>
+  <text class="small" x="310" y="2986">Clamp trong [base_pulse_ms, max_pulse_ms]</text>
+  <text class="small" x="310" y="3012">Huong bom: pH_UP hoac pH_DOWN</text>
+
+  <polygon class="decision" points="520,2890 630,2980 520,3070 410,2980"/>
+  <text class="label" x="520" y="2974">Safety cho</text>
+  <text class="label" x="520" y="3002">phep bom?</text>
+
+  <rect class="fail" x="60" y="2895" width="250" height="120"/>
+  <text class="label" x="185" y="2935">PUMP BLOCKED</text>
+  <text class="small" x="185" y="2965">checkPhPumpAllowed() fail</text>
+  <text class="small" x="185" y="2991">Khong bat relay, ve IDLE</text>
+
+  <rect class="ok" x="720" y="3240" width="360" height="130"/>
+  <text class="label" x="900" y="3280">THUC THI XUNG BOM</text>
+  <text class="small" x="900" y="3310">Start relay pH_UP / pH_DOWN</text>
+  <text class="small" x="900" y="3336">Tick pulse non-blocking ben trong DOSING</text>
+
+  <polygon class="decision" points="900,3430 1030,3550 900,3670 770,3550"/>
+  <text class="label" x="900" y="3532">Pulse da xong?</text>
+  <text class="tiny" x="900" y="3560">Neu chua xong thi tiep tuc o DOSING</text>
+
+  <rect class="ok" x="1140" y="3490" width="310" height="120"/>
+  <text class="label" x="1295" y="3530">EXIT SAFE MODE</text>
+  <text class="small" x="1295" y="3560">clearPhSensorErrorFlag()</text>
+  <text class="small" x="1295" y="3586">Thoat safe mode va ve IDLE</text>
+
+  <!-- arrows -->
+  <path class="arrow" d="M800 220 L800 280"/>
+  <path class="arrow" d="M940 410 L990 410"/>
+  <path class="arrow" d="M1290 410 L1260 410"/>
+  <path class="arrow" d="M1140 500 L1140 560 L1250 560 L1250 580"/>
+  <path class="arrow" d="M1250 700 L1250 760"/>
+  <path class="arrow" d="M1120 880 L1010 880"/>
+  <path class="arrow" d="M1010 880 L1010 885 L1010 885 L1010 885 L1010 885 L1010 885 L1010 885 L1010 885"/>
+  <path class="arrow" d="M1010 885 L1010 885 L1010 885 L1010 885 L1010 885 L1010 885 L1010 885 L800 885"/>
+  <path class="arrow" d="M480 900 L590 900"/>
+  <path class="arrow" d="M800 950 L800 1040"/>
+  <path class="arrow" d="M800 1300 L800 1360"/>
+  <path class="arrow" d="M800 1450 L800 1510"/>
+  <path class="arrow" d="M660 1640 L500 1640"/>
+  <path class="arrow" d="M500 1640 L500 1630 L500 1630 L500 1630 L500 1630 L500 1630 L500 1630"/>
+  <path class="arrow" d="M500 1630 L500 1630 L500 1630 L500 1630 L500 1630 L500 1630 L500 1630 L500 1630 L500 1630 L500 1630"/>
+  <path class="arrow" d="M500 1630 L500 1630 L320 1630"/>
+  <path class="arrow" d="M800 1770 L800 1830"/>
+  <path class="arrow" d="M800 1970 L800 2030"/>
+  <path class="arrow" d="M940 2160 L1080 2160"/>
+  <path class="arrow" d="M800 2290 L800 2370"/>
+  <path class="arrow" d="M800 2480 L800 2540"/>
+  <path class="arrow" d="M940 2670 L1010 2670"/>
+  <path class="arrow" d="M1230 2670 L1260 2600"/>
+  <path class="arrow" d="M1120 2760 L1260 2755"/>
+  <path class="arrow" d="M800 2800 L800 2860"/>
+  <path class="arrow" d="M940 2990 L1060 2980"/>
+  <path class="arrow" d="M660 2990 L630 2980"/>
+  <path class="arrow" d="M410 2980 L310 2980"/>
+  <path class="arrow" d="M500 2965 L410 2970"/>
+  <path class="arrow" d="M520 3070 L520 3300 L720 3300"/>
+  <path class="arrow" d="M900 3370 L900 3430"/>
+  <path class="arrow" d="M1030 3550 L1140 3550"/>
+  <path class="arrow" d="M900 3670 L900 3720 L900 3720 L900 3720"/>
+
+  <!-- loop-back to idle -->
+  <path class="arrow" d="M1510 410 L1540 410 L1540 175 L1010 175"/>
+  <path class="arrow" d="M320 1630 L90 1630 L90 175 L590 175"/>
+  <path class="arrow" d="M1470 2160 L1540 2160 L1540 175 L1010 175"/>
+  <path class="arrow" d="M1510 2600 L1540 2600 L1540 175 L1010 175"/>
+  <path class="arrow" d="M1510 2755 L1540 2755 L1540 175 L1010 175"/>
+  <path class="arrow" d="M1340 2980 L1540 2980 L1540 175 L1010 175"/>
+  <path class="arrow" d="M310 2980 L90 2980 L90 175 L590 175"/>
+  <path class="arrow" d="M1450 3550 L1540 3550 L1540 175 L1010 175"/>
+
+  <!-- labels -->
+  <text class="yesno" x="650" y="255">Khong</text>
+  <text class="yesno" x="955" y="395">Co</text>
+  <text class="yesno" x="1200" y="305">Co</text>
+  <text class="yesno" x="1285" y="740">Khong</text>
+  <text class="yesno" x="1045" y="865">Co</text>
+  <text class="yesno" x="700" y="1085">Khong</text>
+  <text class="yesno" x="820" y="1338">Co</text>
+  <text class="yesno" x="700" y="1490">Co</text>
+  <text class="yesno" x="760" y="1810">Dat</text>
+  <text class="yesno" x="955" y="2145">Co</text>
+  <text class="yesno" x="820" y="2352">Khong</text>
+  <text class="yesno" x="955" y="2655">Co</text>
+  <text class="yesno" x="1160" y="2560">Yes</text>
+  <text class="yesno" x="840" y="2838">Khong</text>
+  <text class="yesno" x="960" y="2975">Co</text>
+  <text class="yesno" x="675" y="2975">Khong</text>
+  <text class="yesno" x="1045" y="3538">Co</text>
+  <text class="yesno" x="915" y="3700">Khong</text>
+
+  <!-- framing note -->
+  <rect class="note" x="1080" y="110" width="420" height="130"/>
+  <text class="label" x="1290" y="150">GHI CHU</text>
+  <text class="small" x="1290" y="180">pH khong di qua data pipeline chung</text>
+  <text class="small" x="1290" y="206">Chi doc trong phien rieng khi relay da tat</text>
+  <text class="small" x="1290" y="232">Dashboard/OLED lay pH tu phSessionMgr.lastMedianPh()</text>
+</svg>

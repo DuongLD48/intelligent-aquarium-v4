@@ -14,6 +14,22 @@
 // Global singleton
 SafetyCore safetyCore;
 
+const char* safetyEventToString(SafetyEvent evt) {
+    switch (evt) {
+        case SafetyEvent::NONE:                 return "NONE";
+        case SafetyEvent::THERMAL_CUTOFF:       return "THERMAL_CUTOFF";
+        case SafetyEvent::EMERGENCY_COOL:       return "EMERGENCY_COOL";
+        case SafetyEvent::HEATER_RUNTIME_LIMIT: return "HEATER_RUNTIME_LIMIT";
+        case SafetyEvent::HEATER_COOLDOWN:      return "HEATER_COOLDOWN";
+        case SafetyEvent::SENSOR_UNRELIABLE:    return "SENSOR_UNRELIABLE";
+        case SafetyEvent::SENSOR_STALE:         return "SENSOR_STALE";
+        case SafetyEvent::MUTUAL_EXCLUSION:     return "MUTUAL_EXCLUSION";
+        case SafetyEvent::PH_PUMP_INTERVAL:     return "PH_PUMP_INTERVAL";
+        case SafetyEvent::SHOCK_GUARD:          return "SHOCK_GUARD";
+        default:                                return "UNKNOWN";
+    }
+}
+
 // ----------------------------------------------------------------
 // SafetyLimits validator
 // ----------------------------------------------------------------

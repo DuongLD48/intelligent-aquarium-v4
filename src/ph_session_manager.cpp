@@ -30,12 +30,16 @@
 // Global singleton
 PhSessionManager phSessionMgr;
 
+static constexpr float PH_SESSION_LOW_PASS_ALPHA = 0.40f;
+
 // ----------------------------------------------------------------
 PhSessionManager::PhSessionManager()
     : _state(PhSessionState::IDLE),
       _stateEnteredMs(0),
       _sampleCount(0),
       _lastSampleMs(0),
+      _sessionLowPassPh(NAN),
+      _sessionLowPassPrimed(false),
       _lastMedianPh(NAN),
       _lastSessionTs(0),
       _lastMedian(NAN),
@@ -75,6 +79,10 @@ void PhSessionManager::triggerNow() {
         LOG_WARNING("PHSESS", "triggerNow ignored — already in session (state=%s)", stateStr());
         return;
     }
+    if (waterChangeManager.isBusy()) {
+        LOG_WARNING("PHSESS", "triggerNow ignored — water change is busy");
+        return;
+    }
     LOG_INFO("PHSESS", "Manual trigger → starting session now");
     _enterState(PhSessionState::SAFE_MODE_WAIT);
 }
@@ -105,6 +113,10 @@ bool PhSessionManager::update() {
     {
         uint32_t elapsed = now - _stateEnteredMs;
         if (elapsed >= _cfg.measure_interval_ms) {
+            if (waterChangeManager.isBusy()) {
+                LOG_WARNING("PHSESS", "Interval elapsed but water change is busy — delaying pH session");
+                break;
+            }
             LOG_INFO("PHSESS", "Interval elapsed (%lus) → starting pH session",
                      (unsigned long)(_cfg.measure_interval_ms / 1000));
             _enterState(PhSessionState::SAFE_MODE_WAIT);
@@ -142,14 +154,16 @@ bool PhSessionManager::update() {
         if ((now - _lastSampleMs) >= SENSOR_READ_INTERVAL_MS
             && _sampleCount < PH_SESSION_MAX_SAMPLES)
         {
-            float ph = readPhOnce();
+            float rawPh = readPhOnce();
 
-            if (!isnan(ph) && ph >= 3.0f && ph <= 10.0f) {
-                _samples[_sampleCount++] = ph;
-                LOG_INFO("PHSESS", "Sample[%d/%d] = %.3f (direct ADC, relay OFF)",
-                         _sampleCount - 1, (int)PH_SESSION_MAX_SAMPLES, ph);
+            if (!isnan(rawPh) && rawPh >= 3.0f && rawPh <= 10.0f) {
+                float filteredPh = _applySessionLowPass(rawPh);
+                _samples[_sampleCount++] = filteredPh;
+                LOG_INFO("PHSESS", "Sample[%d/%d] raw=%.3f filtered=%.3f (LPF a=%.2f, relay OFF)",
+                         _sampleCount - 1, (int)PH_SESSION_MAX_SAMPLES,
+                         rawPh, filteredPh, PH_SESSION_LOW_PASS_ALPHA);
             } else {
-                LOG_WARNING("PHSESS", "Sample invalid (ph=%.3f) — skipped", ph);
+                LOG_WARNING("PHSESS", "Sample invalid (ph=%.3f) — skipped", rawPh);
             }
             _lastSampleMs = now;
         }
@@ -210,20 +224,25 @@ void PhSessionManager::_enterState(PhSessionState s) {
         break;
 
     case PhSessionState::COLLECTING:
-        _sampleCount  = 0;
-        _lastSampleMs = 0;
+        _sampleCount          = 0;
+        _lastSampleMs         = 0;
+        _sessionLowPassPh     = NAN;
+        _sessionLowPassPrimed = false;
         memset(_samples, 0, sizeof(_samples));
-        LOG_INFO("PHSESS", "→ COLLECTING (max %lus, up to %d samples)",
+        LOG_INFO("PHSESS", "→ COLLECTING (max %lus, up to %d samples, LPF a=%.2f)",
                  (unsigned long)((_cfg.session_duration_ms - _cfg.warmup_ms) / 1000),
-                 (int)PH_SESSION_MAX_SAMPLES);
+                 (int)PH_SESSION_MAX_SAMPLES,
+                 PH_SESSION_LOW_PASS_ALPHA);
         break;
 
     case PhSessionState::DOSING:
     {
-        // ── Không có mẫu → thoát sớm ───────────────────────────────
-        if (_sampleCount == 0) {
-            LOG_WARNING("PHSESS", "DOSING: no samples collected (all out of range) — sensor error");
-            firebaseClient.logPhSensorError(NAN, NAN, 0);  // Indicate all samples out of range
+        // ── Chưa đủ 6 mẫu hợp lệ → lỗi cảm biến ────────────────────
+        if (_sampleCount < PH_SESSION_MAX_SAMPLES) {
+            LOG_WARNING("PHSESS",
+                        "DOSING: only %d/%d valid samples — sensor error",
+                        _sampleCount, (int)PH_SESSION_MAX_SAMPLES);
+            firebaseClient.logPhSensorError(NAN, (float)PH_SESSION_MAX_SAMPLES, _sampleCount);
             _lastMedianPh = NAN;
             _lastDose     = PhDoseResult{};
             systemManager.exitSafeMode();
@@ -232,13 +251,21 @@ void PhSessionManager::_enterState(PhSessionState s) {
             return;
         }
 
-        // ── Bước 1: Kiểm tra nhiễu — max-min của các mẫu ──────────
-        float sMin = _samples[0], sMax = _samples[0];
-        for (uint8_t i = 1; i < _sampleCount; i++) {
-            if (_samples[i] < sMin) sMin = _samples[i];
-            if (_samples[i] > sMax) sMax = _samples[i];
+        // ── Bước 1: Bỏ min/max, kiểm tra spread trên 4 mẫu giữa ───
+        float median = NAN;
+        float spread = NAN;
+        if (!_calcTrimmedStats(median, spread)) {
+            LOG_WARNING("PHSESS",
+                        "DOSING: trimmed stats unavailable with %d samples â€” sensor error",
+                        _sampleCount);
+            firebaseClient.logPhSensorError(NAN, (float)PH_SESSION_MAX_SAMPLES, _sampleCount);
+            _lastMedianPh = NAN;
+            _lastDose     = PhDoseResult{};
+            systemManager.exitSafeMode();
+            _state          = PhSessionState::IDLE;
+            _stateEnteredMs = millis();
+            return;
         }
-        float spread = sMax - sMin;
 
         if (spread > _cfg.noise_threshold) {
             // NOISY — cảm biến nhiễu, không có dữ liệu đáng tin
@@ -247,7 +274,7 @@ void PhSessionManager::_enterState(PhSessionState s) {
             _pendingShockMedian = NAN;
 
             LOG_WARNING("PHSESS",
-                "NOISY: spread=%.3f > threshold=%.3f — skip dose (noisyStreak=%d)",
+                "NOISY: trimmed spread=%.3f > threshold=%.3f — skip dose (noisyStreak=%d)",
                 spread, _cfg.noise_threshold, (int)_noisyStreak);
 
             firebaseClient.logPhSensorError(spread, _cfg.noise_threshold, _sampleCount);
@@ -269,12 +296,11 @@ void PhSessionManager::_enterState(PhSessionState s) {
             return;
         }
 
-        // ── Bước 2: Tính trung vị ──────────────────────────────────
-        float median   = _calcMedian();
+        // ── Bước 2: Dùng trung vị của 4 mẫu giữa ──────────────────
         _lastSessionTs = time(nullptr);
         _noisyStreak   = 0;  // Session hợp lệ → reset bộ đếm nhiễu
 
-        LOG_INFO("PHSESS", "→ DOSING: %d samples, spread=%.3f, median pH=%.3f",
+        LOG_INFO("PHSESS", "→ DOSING: %d samples, trimmed spread=%.3f, median pH=%.3f",
                  _sampleCount, spread, median);
 
         // ── Bước 3: Kiểm tra biến động đột ngột — so với session trước
@@ -356,11 +382,28 @@ void PhSessionManager::_enterState(PhSessionState s) {
 }
 
 // ================================================================
-// CALC MEDIAN — sort in-place trên bản sao, trả về giá trị giữa
+// APPLY SESSION LOW-PASS — EMA theo từng session đo pH
+// Mẫu đầu tiên dùng trực tiếp để tránh bias khởi động.
 // ================================================================
-float PhSessionManager::_calcMedian() {
-    if (_sampleCount == 0) return NAN;
-    if (_sampleCount == 1) return _samples[0];
+float PhSessionManager::_applySessionLowPass(float rawPh) {
+    if (!_sessionLowPassPrimed || isnan(_sessionLowPassPh)) {
+        _sessionLowPassPh     = rawPh;
+        _sessionLowPassPrimed = true;
+        return _sessionLowPassPh;
+    }
+
+    _sessionLowPassPh += PH_SESSION_LOW_PASS_ALPHA * (rawPh - _sessionLowPassPh);
+    return _sessionLowPassPh;
+}
+
+// ================================================================
+// CALC TRIMMED STATS — sort bản sao, bỏ min/max, lấy median + spread
+// ================================================================
+bool PhSessionManager::_calcTrimmedStats(float& median, float& spread) {
+    median = NAN;
+    spread = NAN;
+
+    if (_sampleCount < PH_SESSION_MAX_SAMPLES) return false;
 
     float tmp[PH_SESSION_MAX_SAMPLES];
     memcpy(tmp, _samples, _sampleCount * sizeof(float));
@@ -374,11 +417,25 @@ float PhSessionManager::_calcMedian() {
         }
     }
 
-    if (_sampleCount % 2 == 1) {
-        return tmp[_sampleCount / 2];
-    } else {
-        return (tmp[_sampleCount / 2 - 1] + tmp[_sampleCount / 2]) * 0.5f;
+    constexpr uint8_t kTrimEachSide = 1;
+    const uint8_t trimmedCount = _sampleCount - (kTrimEachSide * 2);
+    if (trimmedCount < 4) return false;
+
+    const uint8_t start = kTrimEachSide;
+    const uint8_t end   = start + trimmedCount;
+
+    float sMin = tmp[start];
+    float sMax = tmp[start];
+    for (uint8_t i = start + 1; i < end; i++) {
+        if (tmp[i] < sMin) sMin = tmp[i];
+        if (tmp[i] > sMax) sMax = tmp[i];
     }
+
+    spread = sMax - sMin;
+
+    const uint8_t mid = start + (trimmedCount / 2);
+    median = (tmp[mid - 1] + tmp[mid]) * 0.5f;
+    return true;
 }
 
 // ================================================================
